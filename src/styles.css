@@ -419,6 +419,191 @@ h3 {
   box-shadow: inset 4px 0 0 var(--brand-red);
 }
 
+/* Contagem que provavelmente é erro de digitação (correções 2 e 3 do item 9
+   do escopo). Chama atenção sem impedir o envio. */
+.productCard.hasAlert {
+  border-color: rgba(200, 138, 45, 0.9);
+  box-shadow: inset 4px 0 0 rgba(200, 138, 45, 0.9);
+}
+
+/* --- Fichas técnicas: leitura em tablet durante o serviço --------------- */
+
+.fichaList {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.fichaCard {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  overflow: hidden;
+}
+
+.fichaCard.isOpen {
+  border-color: rgba(200, 138, 45, 0.55);
+}
+
+/* Alvo de toque grande: dedo com a mão molhada, atrás do bar. */
+.fichaHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: 100%;
+  min-height: 68px;
+  padding: 0.9rem 1.1rem;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fichaHead h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.25;
+}
+
+.fichaHead span {
+  display: block;
+  margin-top: 0.2rem;
+  color: #a1a1a1;
+  font-size: 0.85rem;
+}
+
+.fichaHead em {
+  flex: none;
+  width: 2rem;
+  color: var(--brand-amber, #c88a2d);
+  font-size: 1.5rem;
+  font-style: normal;
+  text-align: center;
+}
+
+.fichaBody {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0 1.1rem 1.1rem;
+}
+
+/* Batch e serviço separados visualmente: são decisões diferentes na bancada. */
+.fichaBloco {
+  padding: 0.75rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.fichaBloco.batch {
+  box-shadow: inset 3px 0 0 rgba(200, 138, 45, 0.85);
+}
+
+.fichaBloco.servico {
+  box-shadow: inset 3px 0 0 rgba(120, 170, 255, 0.7);
+}
+
+.fichaBloco h3 {
+  margin: 0 0 0.5rem;
+  color: #d4d4d4;
+  font-size: 0.72rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.fichaLinha {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.95rem;
+}
+
+.fichaLinha:last-child {
+  border-bottom: 0;
+}
+
+.fichaLinha span {
+  flex: 1;
+}
+
+.fichaLinha strong {
+  white-space: nowrap;
+}
+
+.fichaLinha em {
+  min-width: 6.5rem;
+  color: #909090;
+  font-size: 0.8rem;
+  font-style: normal;
+  text-align: right;
+}
+
+.fichaLinha.total {
+  margin-top: 0.3rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  border-bottom: 0;
+  padding-top: 0.5rem;
+  font-weight: 700;
+}
+
+.fichaCampo {
+  display: flex;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.95rem;
+}
+
+.fichaCampo span {
+  min-width: 7.5rem;
+  color: #909090;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Campo não preenchido tem que gritar, não sumir. */
+.fichaCampo.emAberto {
+  background: rgba(200, 138, 45, 0.14);
+  color: #ffd9a1;
+  font-weight: 700;
+}
+
+.fichaPendencia {
+  margin: 0;
+  padding: 0.6rem 0.9rem;
+  border-radius: 8px;
+  background: rgba(200, 138, 45, 0.18);
+  color: #ffd9a1;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+@media (min-width: 720px) {
+  .fichasScreen .fichaList {
+    grid-template-columns: repeat(2, 1fr);
+    align-items: start;
+  }
+}
+
+.countAlert {
+  margin: -0.25rem 0 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  background: rgba(200, 138, 45, 0.18);
+  color: #ffd9a1;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
 .cardHead,
 .historyCard,
 .bottomActions,

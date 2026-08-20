@@ -1,22 +1,49 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import ephigeniaLogo from "./assets/ephigenia.jpg";
+import {
+  APPS_SCRIPT_TOKEN,
+  DEFAULT_INTEGRATION,
+  bootstrap,
+  consultarSaldos,
+  isAppsScriptWebAppUrl,
+  listarCatalogo,
+  listarMovimentos,
+  listarUsuarios,
+  loadIntegration,
+  salvarCatalogo,
+  salvarUsuarios,
+} from "./lib/api.js";
+import { entrar, carregarSessao, limparSessao, salvarSessao } from "./lib/auth.js";
+import {
+  COQUETEIS,
+  PRODUCOES,
+  batchavelForaDaOP,
+  dosesPorGalao,
+  ehIntermediaria,
+  estaEmAberto,
+  fatoresDe,
+  insumoPorChave,
+  nomeDaReferencia,
+  parEmGaloes,
+  pendenciasDaProducao,
+  pendenciasDoCoquetel,
+  produtosExigidos,
+  rendimentoEmGaloes,
+  resumoDePendencias,
+  servicoTemTotal,
+  totalDoBatch,
+  totalDoServico,
+  validadeDias,
+} from "./lib/fichas/index.js";
+import { CODIGOS_LOCAIS, CODIGOS_PERFIS, PERFIS, SETOR_PARA_LOCAL, ehAdmin, normalizarPerfis, rotuloPerfis } from "./lib/perfis.js";
+import { STORAGE_KEYS, loadJson, saveJson } from "./lib/storage.js";
 import "./styles.css";
 
 const BARS = ["22", "23", "Chivas", "Cozinha", "Estoque"];
 const INVENTORY_TYPES = ["Abertura", "Fechamento", "Inventário geral"];
 const SHIFTS = ["Dia", "Noite"];
 const FRACTIONS = [0, 0.25, 0.3, 0.5, 0.7, 0.75];
-const STORAGE_KEYS = {
-  leader: "barInventory.leader",
-  currentUser: "barInventory.currentUser",
-  users: "barInventory.users",
-  integration: "barInventory.integration",
-  products: "barInventory.products",
-  inventories: "barInventory.inventories",
-  draft: "barInventory.draft",
-  movements: "barInventory.movements",
-};
 
 const WITHDRAWAL_REASONS = ["Produção", "Quebra", "Perda", "Evento", "Consumo Interno", "Outro"];
 
@@ -24,19 +51,17 @@ const WITHDRAWAL_REASONS = ["Produção", "Quebra", "Perda", "Evento", "Consumo 
 // fluxo é repensado; para reativar, basta trocar para true.
 const WITHDRAWAL_ENABLED = false;
 
-const DEFAULT_INTEGRATION = {
-  appsScriptUrl: "https://script.google.com/macros/s/AKfycbwkpfNZz_CAr7viDL8YvFjE2J_o9wyd3gybqrZMyAE94WO3UaUFSKI89gk-srqvEg/exec",
-};
+// Fase 2 do escopo (ligada em 20/08/2026): a contagem continua gravando onde
+// grava hoje e passa a gravar também em MOVIMENTOS. Cada produto contado vira
+// uma linha CONTAGEM (a conferência, fora do saldo) e, quando o contado difere
+// do saldo teórico, uma linha AJUSTE — e esse ajuste é a quebra.
+const ESPELHAR_MOVIMENTOS = true;
 
-// URLs de implantações antigas do Apps Script (substituídas em 05/07/2026);
-// dispositivos que as tenham salvas migram para a URL atual do catálogo.
-const LEGACY_APPS_SCRIPT_URLS = new Set([
-  "https://script.google.com/macros/s/AKfycbz3srEqJficsymLS__sEgj7s3VxFA14EZHQWg7jG5ukB0_4azZbIfGzGMF6o3dF3A5n/exec",
-]);
-
-// Chave que autentica o app no Apps Script; sem ela o script recusa a
-// requisição. Precisa ser idêntica à constante APP_TOKEN do Code.gs.
-const APPS_SCRIPT_TOKEN = "EPH-2026-a7c31f98d4e2b6f0-inventario";
+// Correção 2 do item 9: em 19/07 uma Stella Purê Gold foi contada como 43992
+// e passou direto. Acima deste múltiplo do último saldo conhecido o app pede
+// confirmação — avisa, não bloqueia, porque contagem legítima pode subir.
+const FATOR_ALERTA_CONTAGEM = 5;
+const PISO_ALERTA_CONTAGEM = 100;
 
 const DEFAULT_USERS = [
   {
@@ -64,6 +89,9 @@ const CATEGORIES = [
   "Petiscos e diversos",
   "Copos e taças",
   "Material",
+  // Fase 4: saem de uma ordem de produção, não de compra.
+  "Produção",
+  "Pré-batch",
 ];
 
 const SETOR_ORIGEM = {
@@ -401,19 +429,6 @@ const catalogSeed = [
   ativo: true,
 }));
 
-function loadJson(key, fallback) {
-  try {
-    const value = localStorage.getItem(key);
-    return value ? JSON.parse(value) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function saveJson(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
-}
-
 function normalizeUser(user, index = 0) {
   return {
     id: user.id || uid("user"),
@@ -423,14 +438,6 @@ function normalizeUser(user, index = 0) {
     setores: Array.isArray(user.setores) && user.setores.length ? user.setores : BARS,
     ativo: user.ativo !== false,
   };
-}
-
-function loadIntegration() {
-  const merged = { ...DEFAULT_INTEGRATION, ...loadJson(STORAGE_KEYS.integration, {}) };
-  if (LEGACY_APPS_SCRIPT_URLS.has(String(merged.appsScriptUrl || "").trim())) {
-    merged.appsScriptUrl = DEFAULT_INTEGRATION.appsScriptUrl;
-  }
-  return merged;
 }
 
 function loadUsers() {
@@ -453,6 +460,23 @@ function loadCurrentUser(users) {
     if (user) return user;
   }
   return null;
+}
+
+// Quem já estava logado no esquema antigo (nome + PIN local) continua logado:
+// a sessão nova é montada a partir do usuário local que estava salvo.
+function loadSession(users) {
+  const sessao = carregarSessao();
+  if (sessao) return sessao;
+  const antigo = loadCurrentUser(users);
+  if (!antigo) return null;
+  return {
+    id: antigo.id,
+    nome: antigo.nome,
+    login: String(antigo.nome || "").trim().toLowerCase(),
+    perfis: normalizarPerfis(antigo.perfil),
+    setores: antigo.setores,
+    origem: "local",
+  };
 }
 
 function today() {
@@ -533,12 +557,46 @@ function normalizeProduct(product, index = 0) {
     unidadesPorFardo,
     estoqueAtual: numberValue(product.estoqueAtual),
     editadoManualmente: Boolean(product.editadoManualmente),
+    // Fase 4: batch e xarope saem de uma OP, não de compra. Quando o produto
+    // não declara, o catálogo infere pela categoria na hora de exportar.
+    produzido: Boolean(product.produzido),
+    requisitavel: product.requisitavel,
     ativo: product.ativo !== false,
   };
 }
 
+/**
+ * Produtos que as fichas técnicas exigem e que ainda não existem no catálogo:
+ * os insumos de produção, as 6 produções e os 5 pré-batches.
+ *
+ * O casamento é por nome normalizado, para não criar um segundo "Gengibre"
+ * quando já houver um cadastrado com outro id. Ficam no setor Cozinha, que é
+ * o que SETOR_PARA_LOCAL mapeia para PRODUCAO — é por ali que a contagem da
+ * área de produção alimenta o saldo que a OP vai conferir.
+ */
+function fichaProductSeeds(existentes) {
+  const nomes = new Set(existentes.map((product) => normalizeMatchName(product.nome)));
+  return produtosExigidos()
+    .filter((exigido) => !nomes.has(normalizeMatchName(exigido.nome)))
+    .map((exigido) => normalizeProduct({
+      id: `ficha-${exigido.chave}`,
+      nome: exigido.nome,
+      categoria: exigido.categoria,
+      tipoContagem: "unidade",
+      unidade: exigido.unidade,
+      setores: ["Cozinha"],
+      origemPlanilha: "FICHA_TECNICA",
+      fornecedor: "",
+      parStock: exigido.minimo || 0,
+      produzido: exigido.produzido,
+      requisitavel: exigido.requisitavel,
+      ativo: true,
+    }));
+}
+
 function loadProducts() {
-  const seeds = OFFICIAL_SHEET_PRODUCTS.map(normalizeProduct);
+  const oficiais = OFFICIAL_SHEET_PRODUCTS.map(normalizeProduct);
+  const seeds = [...oficiais, ...fichaProductSeeds(oficiais)];
   const stored = loadJson(STORAGE_KEYS.products, null);
   if (!stored || !Array.isArray(stored) || !stored.length) return seeds;
   const seedsById = new Map(seeds.map((product) => [product.id, product]));
@@ -624,6 +682,32 @@ function getOperationalCategory(item) {
   return "Insumos";
 }
 
+// Correções 2 e 3 do item 9: sinaliza a contagem que provavelmente é erro de
+// digitação. Só avisa — contagem legítima pode subir de verdade, e travar o
+// envio no meio da operação é pior que uma linha errada na planilha.
+function contagemSuspeita(item) {
+  const quantidade = numberValue(item.quantidade);
+  if (quantidade <= 0) return "";
+
+  // Correção 3: produto contado em garrafa só aceita as frações da régua.
+  // Gin Gordons = 328.8 era decimal de dose convivendo com contagem de
+  // garrafa; com a unidade fixa no catálogo, 0.8 não existe mais.
+  if (item.tipoContagem === "garrafa") {
+    const fracao = roundCount(quantidade - Math.floor(quantidade));
+    if (fracao > 0 && !FRACTIONS.includes(fracao)) {
+      return `Fração ${fracao} não existe na contagem por garrafa (use ${FRACTIONS.filter(Boolean).join(", ")}).`;
+    }
+  }
+
+  // Correção 2: valor muito acima do último saldo conhecido.
+  const referencia = Math.max(numberValue(item.estoqueAnterior), numberValue(item.parStock));
+  if (referencia > 0 && quantidade > PISO_ALERTA_CONTAGEM && quantidade > referencia * FATOR_ALERTA_CONTAGEM) {
+    return `Muito acima do último saldo conhecido (${referencia}). Confira antes de enviar.`;
+  }
+
+  return "";
+}
+
 function calcItemValues(item) {
   const abertura = roundCount(numberValue(item.aberturaInteira) + numberValue(item.aberturaFracionado));
   const fechamento = roundCount(numberValue(item.fechamentoInteira) + numberValue(item.fechamentoFracionado));
@@ -657,6 +741,8 @@ function createInventory(meta, leader, products) {
           fornecedor: product.fornecedor,
           origemPlanilha: product.origemPlanilha,
           parStock: product.parStock,
+          // Referência do alerta de teto (correção 2 do item 9).
+          estoqueAnterior: numberValue(product.estoqueAtual),
           aberturaInteira: 0,
           aberturaFracionado: 0,
           abertura: 0,
@@ -778,18 +864,22 @@ function inventoryToWorkbookPayload(inventory) {
     bar: inventory.bar,
     tipo: inventory.tipo,
     lider: inventory.lider,
+    usuarioId: inventory.usuarioId || "",
+    local: SETOR_PARA_LOCAL[inventory.bar] || "",
+    espelharMovimentos: ESPELHAR_MOVIMENTOS,
     itens: inventory.itens
       .filter((item) => item.fechamentoContado || numberValue(item.quantidade) > 0 || item.observacao.trim())
+      // Correção 4 do item 9: item sem produto identificado não vai para a
+      // planilha. Eram as linhas com 0 e sem nome que apareciam lá.
+      .filter((item) => String(item.nome || "").trim() && item.produtoId)
       .map((item) => ({
         produto: item.nome,
+        produtoId: item.produtoId,
         quantidade: numberValue(item.quantidade),
+        unidade: item.unidade,
         observacao: item.observacao,
       })),
   };
-}
-
-function isAppsScriptWebAppUrl(url) {
-  return /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(String(url || "").trim());
 }
 
 export async function sendInventoryToSheet(inventory) {
@@ -933,7 +1023,7 @@ function exportInventoryCsv(inventory, products) {
 
 function App() {
   const [users, setUsers] = useState(loadUsers);
-  const [currentUser, setCurrentUser] = useState(() => loadCurrentUser(loadUsers()));
+  const [currentUser, setCurrentUser] = useState(() => loadSession(loadUsers()));
   const [screen, setScreen] = useState(currentUser ? "home" : "login");
   const [products, setProducts] = useState(loadProducts);
   const [inventories, setInventories] = useState(() => loadJson(STORAGE_KEYS.inventories, []).map(migrateInventory));
@@ -942,18 +1032,13 @@ function App() {
   const [integration, setIntegration] = useState(loadIntegration);
   const [selectedInventory, setSelectedInventory] = useState(null);
   const [toast, setToast] = useState("");
-  const isAdmin = currentUser?.perfil === "admin";
+  const isAdmin = ehAdmin(currentUser);
   const leader = currentUser?.nome || "";
 
   useEffect(() => saveJson(STORAGE_KEYS.users, users), [users]);
   useEffect(() => {
-    if (currentUser) {
-      saveJson(STORAGE_KEYS.currentUser, { id: currentUser.id });
-      localStorage.setItem(STORAGE_KEYS.leader, currentUser.nome);
-    } else {
-      localStorage.removeItem(STORAGE_KEYS.currentUser);
-      localStorage.removeItem(STORAGE_KEYS.leader);
-    }
+    if (currentUser) salvarSessao(currentUser);
+    else limparSessao();
   }, [currentUser]);
   useEffect(() => saveJson(STORAGE_KEYS.products, products), [products]);
   useEffect(() => saveJson(STORAGE_KEYS.integration, integration), [integration]);
@@ -969,13 +1054,15 @@ function App() {
     window.setTimeout(() => setToast(""), 2600);
   }
 
-  function login(name, pin) {
-    const normalizedName = name.trim().toLowerCase();
-    const user = users.find((item) => item.ativo && item.nome.trim().toLowerCase() === normalizedName && item.pin === pin);
-    if (!user) return false;
-    setCurrentUser(user);
+  // Autentica na planilha; se ela recusar ou não responder, cai para os
+  // usuários locais por PIN. Devolve { ok, error } para a tela de login.
+  async function login(identificador, segredo) {
+    const resultado = await entrar(identificador, segredo, users, BARS);
+    if (!resultado.ok) return resultado;
+    setCurrentUser(resultado.usuario);
     setScreen("home");
-    return true;
+    if (resultado.aviso) notify(resultado.aviso);
+    return resultado;
   }
 
   function logout() {
@@ -1051,6 +1138,10 @@ function App() {
           onProducts={() => setScreen("products")}
           onUsers={() => setScreen("users")}
           onIntegration={() => setScreen("integration")}
+          onBase={() => setScreen("base")}
+          onSheetUsers={() => setScreen("sheetUsers")}
+          onMovements={() => setScreen("movements")}
+          onFichas={() => setScreen("fichas")}
         />
       )}
       {screen === "withdrawal" && WITHDRAWAL_ENABLED && (
@@ -1062,7 +1153,7 @@ function App() {
           products={products}
           user={currentUser}
           onStart={(meta) => {
-            setDraft(createInventory(meta, leader, products));
+            setDraft({ ...createInventory(meta, leader, products), usuarioId: currentUser?.id || "" });
             setScreen("count");
           }}
         />
@@ -1089,6 +1180,14 @@ function App() {
               const ok = window.confirm("Existem itens sem fechamento contado. Deseja enviar mesmo assim?");
               if (!ok) return;
             }
+            // Correção 2 do item 9: a Stella 43992 passou direto por não
+            // existir esta parada.
+            const suspeitos = draft.itens.filter((item) => contagemSuspeita(item));
+            if (suspeitos.length) {
+              const lista = suspeitos.map((item) => `• ${item.nome}: ${numberValue(item.quantidade)}`).join("\n");
+              const ok = window.confirm(`Estas contagens estão fora do padrão:\n\n${lista}\n\nEnviar assim mesmo?`);
+              if (!ok) return;
+            }
             const stockById = new Map(products.map((product) => [product.id, numberValue(product.estoqueAtual)]));
             const sent = {
               ...draft,
@@ -1109,6 +1208,13 @@ function App() {
                     : product
                 )));
               }
+              const espelho = result.result?.espelho || null;
+              const espelhoErro = result.result?.espelhoErro || "";
+              const resumoEspelho = espelho
+                ? `${espelho.contagens} contagem(ns) e ${espelho.ajustes} ajuste(s) em MOVIMENTOS · quebra ${espelho.quebra > 0 ? "+" : ""}${espelho.quebra}`
+                : espelhoErro
+                  ? `Planilha atualizada, mas o espelho em MOVIMENTOS falhou: ${espelhoErro}`
+                  : "";
               const nextInventory = {
                 ...sent,
                 sheetSyncStatus: result.simulated ? "simulado" : "sincronizado",
@@ -1117,6 +1223,8 @@ function App() {
                   : missing.length
                     ? `${result.result.writtenCount} itens gravados. Não encontrados na planilha: ${missing.join(", ")}`
                     : "Enviado para a planilha",
+                espelhoResumo: resumoEspelho,
+                quebra: espelho ? espelho.quebra : null,
               };
               setInventories((current) => [nextInventory, ...current]);
               setDraft(null);
@@ -1125,7 +1233,11 @@ function App() {
                   ? "Inventário salvo. Configure a planilha para enviar."
                   : missing.length
                     ? `Enviado, mas ${missing.length} produto(s) não foram encontrados na planilha.`
-                    : "Inventário enviado para a planilha"
+                    : espelhoErro
+                      ? resumoEspelho
+                      : espelho
+                        ? `Enviado. ${resumoEspelho}.`
+                        : "Inventário enviado para a planilha"
               );
               setScreen(isAdmin ? "history" : "home");
             } catch (error) {
@@ -1149,8 +1261,13 @@ function App() {
       )}
       {screen === "products" && isAdmin && <ProductsScreen products={products} onChange={setProducts} />}
       {screen === "users" && isAdmin && <UsersScreen users={users} onChange={setUsers} currentUserId={currentUser.id} />}
+      {screen === "base" && isAdmin && <BaseScreen products={products} onNotify={notify} />}
+      {screen === "sheetUsers" && isAdmin && <SheetUsersScreen onNotify={notify} />}
+      {screen === "movements" && isAdmin && <MovementsScreen products={products} onNotify={notify} />}
+      {/* Ficha técnica é consulta liberada para todos os perfis. */}
+      {screen === "fichas" && <FichasScreen />}
       {screen === "integration" && isAdmin && <IntegrationScreen integration={integration} onChange={setIntegration} />}
-      {["history", "details", "products", "users", "integration", "stock"].includes(screen) && !isAdmin && (
+      {["history", "details", "products", "users", "integration", "stock", "base", "sheetUsers", "movements"].includes(screen) && !isAdmin && (
         <HomeScreen
           user={currentUser}
           isAdmin={false}
@@ -1158,6 +1275,7 @@ function App() {
           onNew={() => setScreen("new")}
           onResume={() => setScreen("count")}
           onWithdrawal={() => setScreen("withdrawal")}
+          onFichas={() => setScreen("fichas")}
         />
       )}
     </div>
@@ -1171,7 +1289,7 @@ function Header({ user, onHome, onLogout }) {
       <img className="topbarLogo" src={ephigeniaLogo} alt="" />
       <div>
         <strong>Ephigenia</strong>
-        <span>{user?.nome} · {user?.perfil === "admin" ? "Admin" : "Líder"}</span>
+        <span>{user?.nome} · {rotuloPerfis(user?.perfis)}{user?.origem === "local" ? " · reserva" : ""}</span>
       </div>
       <button className="ghostButton compact" onClick={onLogout}>Sair</button>
     </header>
@@ -1182,19 +1300,26 @@ function LoginScreen({ onLogin }) {
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
+  const [entrando, setEntrando] = useState(false);
 
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault();
     if (!name.trim()) {
       setError("Informe o usuário.");
       return;
     }
     if (!pin.trim()) {
-      setError("Informe o PIN.");
+      setError("Informe a senha.");
       return;
     }
-    const success = onLogin(name, pin);
-    if (!success) setError("Usuário ou PIN inválido.");
+    setError("");
+    setEntrando(true);
+    try {
+      const resultado = await onLogin(name.trim(), pin);
+      if (!resultado.ok) setError(resultado.error || "Usuário ou senha inválidos.");
+    } finally {
+      setEntrando(false);
+    }
   }
 
   return (
@@ -1204,30 +1329,36 @@ function LoginScreen({ onLogin }) {
         <p className="eyebrow">Inventário rápido</p>
         <h1>Ephigenia</h1>
         <form onSubmit={submit} className="stack">
-          <Input label="Usuário" value={name} onChange={setName} autoFocus />
-          <Input label="PIN" type="password" value={pin} onChange={setPin} />
+          <Input label="Usuário" value={name} onChange={setName} autoFocus autoComplete="username" />
+          <Input label="Senha" type="password" value={pin} onChange={setPin} autoComplete="current-password" />
           {error && <p className="error">{error}</p>}
-          <Button type="submit">Entrar</Button>
+          <Button type="submit" disabled={entrando}>{entrando ? "Entrando..." : "Entrar"}</Button>
         </form>
+        <p className="miniText">Sem conexão com a planilha, o PIN cadastrado no aparelho continua valendo.</p>
       </section>
     </main>
   );
 }
 
-function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, onStock, onHistory, onProducts, onUsers, onIntegration }) {
+function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, onStock, onHistory, onProducts, onUsers, onIntegration, onBase, onSheetUsers, onMovements, onFichas }) {
   return (
     <main className="screen">
       <p className="eyebrow">Olá, {user?.nome}.</p>
       <h1>{isAdmin ? "Painel do admin" : "O que vamos contar hoje?"}</h1>
-      {!isAdmin && <p className="roleNotice">Perfil líder: acesso liberado para {WITHDRAWAL_ENABLED ? "contagens e retiradas de estoque" : "contagens"}.</p>}
+      {!isAdmin && <p className="roleNotice">{rotuloPerfis(user?.perfis)}: acesso liberado para {WITHDRAWAL_ENABLED ? "contagens e retiradas de estoque" : "contagens"}.</p>}
       <div className="actionGrid">
         {hasDraft && <Button onClick={onResume} variant="amber">Continuar rascunho</Button>}
         <Button onClick={onNew}>Novo inventário</Button>
+        {/* Consulta liberada para todos os perfis. */}
+        <Button onClick={onFichas} variant="secondary">Fichas técnicas</Button>
         {WITHDRAWAL_ENABLED && <Button onClick={onWithdrawal} variant="secondary">Retirada de estoque</Button>}
         {isAdmin && <Button onClick={onStock} variant="secondary">Estoque atual</Button>}
+        {isAdmin && <Button onClick={onMovements} variant="secondary">Movimentos</Button>}
         {isAdmin && <Button onClick={onHistory} variant="secondary">Histórico</Button>}
         {isAdmin && <Button onClick={onProducts} variant="secondary">Produtos</Button>}
-        {isAdmin && <Button onClick={onUsers} variant="secondary">Usuários</Button>}
+        {isAdmin && <Button onClick={onUsers} variant="secondary">Usuários (reserva)</Button>}
+        {isAdmin && <Button onClick={onSheetUsers} variant="secondary">Usuários da planilha</Button>}
+        {isAdmin && <Button onClick={onBase} variant="secondary">Base da planilha</Button>}
         {isAdmin && <Button onClick={onIntegration} variant="secondary">Planilha</Button>}
       </div>
     </main>
@@ -1237,7 +1368,7 @@ function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, on
 function NewInventoryScreen({ products, user, onStart }) {
   const [meta, setMeta] = useState({ data: today(), bar: "", tipo: "", turno: "" });
   const [error, setError] = useState("");
-  const availableBars = user?.perfil === "admin" ? BARS : BARS.filter((bar) => user?.setores?.includes(bar));
+  const availableBars = ehAdmin(user) ? BARS : BARS.filter((bar) => user?.setores?.includes(bar));
   const availableItems = meta.bar ? products.filter((product) => isProductForBar(product, meta.bar)).length : 0;
 
   function start() {
@@ -1363,6 +1494,7 @@ function ProductCard({ item, onChange }) {
     : numberValue(item.valorUnitario);
   const unitsPerPack = defaultUnitsPerPack(item);
   const totalQuantity = roundCount(numberValue(item.quantidadeUnidades) + (numberValue(item.quantidadeFardos) * unitsPerPack));
+  const alerta = contagemSuspeita(item);
 
   function changeMixedQuantity(patch) {
     const nextUnits = numberValue(patch.quantidadeUnidades ?? item.quantidadeUnidades);
@@ -1379,7 +1511,7 @@ function ProductCard({ item, onChange }) {
   }
 
   return (
-    <article className={`productCard cleanCard ${item.fechamentoContado ? "isCounted" : "isPending"} ${item.observacao ? "hasNote" : ""}`}>
+    <article className={`productCard cleanCard ${item.fechamentoContado ? "isCounted" : "isPending"} ${item.observacao ? "hasNote" : ""} ${alerta ? "hasAlert" : ""}`}>
       <div className="cardHead">
         <div>
           <h3>{item.nome}</h3>
@@ -1398,6 +1530,7 @@ function ProductCard({ item, onChange }) {
         <NumberField label={packLabel(item) === "caixa" ? "Caixas" : "Fardos"} value={item.quantidadeFardos} onChange={(quantidadeFardos) => changeMixedQuantity({ quantidadeFardos })} />
       </div>
       <p className="countTotal">Total: {totalQuantity}</p>
+      {alerta && <p className="countAlert">⚠ {alerta}</p>}
       <Input label="Observação" value={item.observacao} onChange={(observacao) => onChange({ observacao })} placeholder="Opcional" />
     </article>
   );
@@ -1407,11 +1540,13 @@ function ReviewScreen({ inventory, onBack, onSend }) {
   const summary = useMemo(() => {
     const counted = inventory.itens.filter((item) => item.fechamentoContado).length;
     const noted = inventory.itens.filter((item) => item.observacao.trim()).length;
+    const alertas = inventory.itens.filter((item) => contagemSuspeita(item));
     return {
       total: inventory.itens.length,
       counted,
       pending: inventory.itens.length - counted,
       noted,
+      alertas,
     };
   }, [inventory]);
 
@@ -1420,6 +1555,16 @@ function ReviewScreen({ inventory, onBack, onSend }) {
       <h1>Revisão</h1>
       <InfoGrid inventory={inventory} />
       {summary.pending > 0 && <p className="warning">Existem {summary.pending} itens sem fechamento contado.</p>}
+      {summary.alertas.length > 0 && (
+        <section className="panel stack">
+          <p className="warning">{summary.alertas.length} contagem(ns) fora do padrão. Confira antes de enviar:</p>
+          {summary.alertas.map((item) => (
+            <p key={item.produtoId} className="miniText">
+              <strong>{item.nome}</strong>: {numberValue(item.quantidade)} — {contagemSuspeita(item)}
+            </p>
+          ))}
+        </section>
+      )}
       <div className="summaryGrid">
         <Metric label="Itens" value={summary.total} />
         <Metric label="Contados" value={summary.counted} />
@@ -1533,6 +1678,7 @@ function InventoryDetailsScreen({ inventory, products, onBack, onNotify }) {
         <p><span>Status</span>{inventory.status}</p>
         <p><span>Origem</span>{inventory.origemPlanilha}</p>
         <p><span>Enviado em</span>{new Date(inventory.enviadoEm).toLocaleString("pt-BR")}</p>
+        {inventory.espelhoResumo && <p><span>MOVIMENTOS</span>{inventory.espelhoResumo}</p>}
       </div>
       <section>
         <p className="label">Exportar contagem</p>
@@ -1771,7 +1917,10 @@ function UsersScreen({ users, onChange, currentUserId }) {
           </article>
         ))}
       </div>
-      <p className="miniText">Admin inicial: usuário Admin, PIN 1234. Troque esse PIN depois de entrar.</p>
+      <p className="miniText">
+        Estes usuários valem só neste aparelho e servem de reserva para quando a planilha não
+        responde. O cadastro que vale em todos os aparelhos é o de "Usuários da planilha".
+      </p>
     </main>
   );
 }
@@ -2030,6 +2179,600 @@ function StockScreen({ products, onSync }) {
           );
         })}
       </div>
+    </main>
+  );
+}
+
+// Converte um produto do app para a linha da aba PRODUTOS. É aqui que a
+// unidade vira fixa (correção 3 do item 9): destilado é garrafa sempre, e a
+// conversão para dose fica na ficha técnica, não na contagem.
+function paraCatalogo(product) {
+  const categoria = getOperationalCategory(product);
+  const insumoInterno = ["Insumos", "Material", "Copos e taças"].includes(categoria);
+  const nome = String(product.nome || "").toLowerCase();
+  // O que veio da ficha técnica já declara os dois campos; o resto do
+  // catálogo continua sendo inferido como antes.
+  const produzido = product.produzido ?? (nome.includes("xarope") || nome.includes("purê") || nome.includes("pure ") || nome.includes("pré-batch"));
+  const requisitavel = product.requisitavel ?? !insumoInterno;
+  return {
+    produtoId: product.id,
+    nome: product.nome,
+    categoria,
+    unidade: product.tipoContagem === "garrafa" ? "garrafa" : product.unidade || "un",
+    fatorPack: defaultUnitsPerPack(product),
+    packNome: packLabel(product),
+    fornecedores: String(product.fornecedor || "").split(",").map((f) => f.trim()).filter(Boolean),
+    // Mínimo vazio nunca entra em sugestão de compra — é o caso do
+    // Absolut Tabasco, que fica ativo mas fora do pedido.
+    minimo: numberValue(product.parStock) || null,
+    ativo: product.ativo !== false,
+    // Bebida é requisitável, insumo de produção não. Batch pronto é
+    // requisitável como qualquer garrafa (Fase 4, B3).
+    requisitavel,
+    produzido,
+  };
+}
+
+// Tela da Fase 1: cria as abas PRODUTOS/USUARIOS/MOVIMENTOS na planilha e
+// mantém o catálogo único sincronizado. É a base que requisição, produção e
+// pedido de compra vão consumir depois.
+function BaseScreen({ products, onNotify }) {
+  const [catalogo, setCatalogo] = useState([]);
+  const [status, setStatus] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+
+  async function executar(tarefa, rotulo) {
+    setOcupado(true);
+    setStatus(`${rotulo}...`);
+    try {
+      const mensagem = await tarefa();
+      setStatus(mensagem);
+      onNotify(mensagem);
+    } catch (error) {
+      const mensagem = error.message || `Falha em ${rotulo.toLowerCase()}.`;
+      setStatus(mensagem);
+      onNotify(mensagem);
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  function criarAbas() {
+    return executar(async () => {
+      const resultado = await bootstrap({ produtos: products.filter((p) => p.ativo).map(paraCatalogo) });
+      return `Abas prontas. ${resultado.produtosCriados} produtos e ${resultado.usuariosCriados} usuário(s) semeados. MOVIMENTOS tem ${resultado.movimentosExistentes} linha(s).`;
+    }, "Criando as abas");
+  }
+
+  function carregar() {
+    return executar(async () => {
+      const produtos = await listarCatalogo();
+      setCatalogo(produtos);
+      return `${produtos.length} produtos lidos da aba PRODUTOS.`;
+    }, "Lendo o catálogo");
+  }
+
+  function enviar() {
+    return executar(async () => {
+      const resultado = await salvarCatalogo(products.filter((p) => p.ativo).map(paraCatalogo));
+      const produtos = await listarCatalogo();
+      setCatalogo(produtos);
+      return `Catálogo enviado: ${resultado.criados} criados, ${resultado.atualizados} atualizados.`;
+    }, "Enviando o catálogo");
+  }
+
+  const requisitaveis = catalogo.filter((produto) => produto.requisitavel).length;
+  const semMinimo = catalogo.filter((produto) => produto.minimo === null).length;
+
+  return (
+    <main className="screen">
+      <h1>Base da planilha</h1>
+      <p className="miniText">
+        Nenhum módulo tem estoque próprio: todos escrevem em MOVIMENTOS, e o saldo de um produto
+        em um local é a soma dos movimentos daquele produto naquele local.
+      </p>
+      <section className="panel stack">
+        <div className="bottomActions inline">
+          <Button onClick={criarAbas} disabled={ocupado}>Criar abas</Button>
+          <button className="ghostButton" onClick={carregar} disabled={ocupado}>Ler catálogo</button>
+          <button className="ghostButton" onClick={enviar} disabled={ocupado}>Enviar catálogo</button>
+        </div>
+        {status && <p className="miniText">{status}</p>}
+      </section>
+      {catalogo.length > 0 && (
+        <>
+          <div className="summaryGrid">
+            <Metric label="Produtos" value={catalogo.length} />
+            <Metric label="Requisitáveis" value={requisitaveis} />
+            <Metric label="Sem mínimo" value={semMinimo} />
+          </div>
+          <div className="list">
+            {catalogo.map((produto) => (
+              <article className={`historyCard ${!produto.ativo ? "inactive" : ""}`} key={produto.produtoId}>
+                <div>
+                  <h3>{produto.nome}</h3>
+                  <p>{produto.categoria} · {produto.unidade} · {produto.fatorPack} un/{produto.packNome}</p>
+                  <p>
+                    Mínimo {produto.minimo === null ? "—" : produto.minimo}
+                    {produto.fornecedores.length ? ` · ${produto.fornecedores.join(", ")}` : ""}
+                  </p>
+                  <span className="status">{produto.requisitavel ? "Requisitável" : "Uso interno"}</span>
+                  {produto.produzido && <span className="status warn">Produzido</span>}
+                </div>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
+    </main>
+  );
+}
+
+// Usuários da planilha: são estes que valem em todos os aparelhos. Os
+// usuários locais da tela "Usuários" continuam existindo só como reserva.
+function SheetUsersScreen({ onNotify }) {
+  const emptyForm = { usuarioId: "", nome: "", login: "", senha: "", perfis: ["consulta"], ativo: true };
+  const [usuarios, setUsuarios] = useState([]);
+  const [form, setForm] = useState(emptyForm);
+  const [status, setStatus] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+
+  async function carregar() {
+    setOcupado(true);
+    try {
+      setUsuarios(await listarUsuarios());
+      setStatus("");
+    } catch (error) {
+      setStatus(error.message || "Falha ao ler a aba USUARIOS.");
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  useEffect(() => { carregar(); }, []);
+
+  async function salvar() {
+    if (!form.nome.trim() || !form.login.trim()) {
+      setStatus("Preencha nome e login.");
+      return;
+    }
+    if (!form.usuarioId && !form.senha.trim()) {
+      setStatus("Defina uma senha para o usuário novo.");
+      return;
+    }
+    if (!form.perfis.length) {
+      setStatus("Selecione pelo menos um perfil.");
+      return;
+    }
+    setOcupado(true);
+    try {
+      await salvarUsuarios([{ ...form, perfil: form.perfis.join(", ") }]);
+      setForm(emptyForm);
+      await carregar();
+      const mensagem = "Usuário salvo na planilha.";
+      setStatus(mensagem);
+      onNotify(mensagem);
+    } catch (error) {
+      setStatus(error.message || "Falha ao salvar.");
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  function editar(usuario) {
+    // Senha em branco na edição significa "mantém a que já está lá".
+    setForm({ usuarioId: usuario.usuarioId, nome: usuario.nome, login: usuario.login, senha: "", perfis: usuario.perfis, ativo: usuario.ativo });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function alternarPerfil(perfil) {
+    const perfis = form.perfis.includes(perfil)
+      ? form.perfis.filter((item) => item !== perfil)
+      : [...form.perfis, perfil];
+    setForm({ ...form, perfis });
+  }
+
+  return (
+    <main className="screen">
+      <h1>Usuários da planilha</h1>
+      <p className="miniText">
+        Senha em planilha não é segurança real — é controle de fluxo e rastreabilidade. Guardamos
+        só o hash. Não reutilize senha pessoal de nada.
+      </p>
+      <section className="panel stack">
+        <Input label="Nome" value={form.nome} onChange={(nome) => setForm({ ...form, nome })} />
+        <Input label="Login" value={form.login} onChange={(login) => setForm({ ...form, login })} placeholder="daniel" />
+        <Input
+          label={form.usuarioId ? "Nova senha (deixe vazio para manter)" : "Senha"}
+          type="password"
+          value={form.senha}
+          onChange={(senha) => setForm({ ...form, senha })}
+        />
+        <section>
+          <p className="label">Perfis (um usuário pode acumular)</p>
+          <div className="chipGrid">
+            {CODIGOS_PERFIS.map((perfil) => (
+              <button
+                key={perfil}
+                type="button"
+                className={form.perfis.includes(perfil) ? "selected" : ""}
+                onClick={() => alternarPerfil(perfil)}
+              >
+                {PERFIS[perfil].nome}
+              </button>
+            ))}
+          </div>
+          {form.perfis.map((perfil) => (
+            <p className="miniText" key={perfil}>{PERFIS[perfil].nome}: {PERFIS[perfil].descricao}</p>
+          ))}
+        </section>
+        <label className="toggle">
+          <input type="checkbox" checked={form.ativo} onChange={(event) => setForm({ ...form, ativo: event.target.checked })} />
+          Usuário ativo
+        </label>
+        {status && <p className="warning">{status}</p>}
+        <div className="bottomActions inline">
+          {form.usuarioId && <button className="ghostButton" onClick={() => setForm(emptyForm)}>Cancelar</button>}
+          <Button onClick={salvar} disabled={ocupado}>{form.usuarioId ? "Salvar usuário" : "Cadastrar usuário"}</Button>
+        </div>
+      </section>
+      {!usuarios.length && <EmptyState title="Nenhum usuário na planilha" text="Crie as abas em Base da planilha e cadastre o primeiro usuário." />}
+      <div className="list">
+        {usuarios.map((usuario) => (
+          <article className={`historyCard ${!usuario.ativo ? "inactive" : ""}`} key={usuario.usuarioId}>
+            <div>
+              <h3>{usuario.nome}</h3>
+              <p>{usuario.login} · {rotuloPerfis(usuario.perfis)}</p>
+              <span className="status">{usuario.ativo ? "Ativo" : "Inativo"}</span>
+            </div>
+            <div className="rowActions">
+              <button className="ghostButton compact" onClick={() => editar(usuario)}>Editar</button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </main>
+  );
+}
+
+// Consulta de ficha técnica. Leitura pura, pensada para tablet no meio do
+// serviço: alvo de toque grande, busca instantânea e nada de scroll infinito.
+//
+// Campo EM ABERTO nunca vira string vazia nem some: quem consulta precisa
+// distinguir "não leva garnish" de "ninguém preencheu o garnish ainda".
+function FichasScreen() {
+  const [aba, setAba] = useState("coqueteis");
+  const [busca, setBusca] = useState("");
+  const [abertoId, setAbertoId] = useState("");
+  const query = busca.trim().toLowerCase();
+  const pendencias = useMemo(() => resumoDePendencias(), []);
+
+  const coqueteis = COQUETEIS.filter((item) => !query || item.nome.toLowerCase().includes(query));
+  const producoes = PRODUCOES.filter((item) => !query || item.nome.toLowerCase().includes(query));
+  const lista = aba === "coqueteis" ? coqueteis : producoes;
+
+  function alternar(id) {
+    setAbertoId((atual) => (atual === id ? "" : id));
+  }
+
+  return (
+    <main className="screen fichasScreen">
+      <h1>Fichas técnicas</h1>
+      {pendencias.total > 0 && (
+        <p className="warning">
+          {pendencias.total} campos ainda EM ABERTO na ficha. Aparecem marcados em cada receita.
+        </p>
+      )}
+      <Input label="Buscar" value={busca} onChange={setBusca} placeholder="Nome do coquetel ou da produção" autoFocus />
+      <div className="quickFilters">
+        <button className={aba === "coqueteis" ? "selected" : ""} onClick={() => setAba("coqueteis")}>
+          Coquetéis ({coqueteis.length})
+        </button>
+        <button className={aba === "producoes" ? "selected" : ""} onClick={() => setAba("producoes")}>
+          Produções ({producoes.length})
+        </button>
+      </div>
+
+      {!lista.length && <EmptyState title="Nada encontrado" text="Tente outro nome." />}
+
+      <div className="fichaList">
+        {aba === "coqueteis" && coqueteis.map((coquetel) => (
+          <FichaCoquetel
+            key={coquetel.id}
+            coquetel={coquetel}
+            aberto={abertoId === coquetel.id}
+            onToggle={() => alternar(coquetel.id)}
+          />
+        ))}
+        {aba === "producoes" && producoes.map((producao) => (
+          <FichaProducao
+            key={producao.id}
+            producao={producao}
+            aberto={abertoId === producao.id}
+            onToggle={() => alternar(producao.id)}
+          />
+        ))}
+      </div>
+    </main>
+  );
+}
+
+function CampoFicha({ rotulo, valor }) {
+  const aberto = estaEmAberto(valor);
+  return (
+    <p className={`fichaCampo ${aberto ? "emAberto" : ""}`}>
+      <span>{rotulo}</span>
+      {aberto ? "EM ABERTO" : valor}
+    </p>
+  );
+}
+
+function LinhaReceita({ linha }) {
+  const insumo = insumoPorChave(linha.insumo);
+  const emLatas = insumo?.unidadeEstoque === "lata";
+  return (
+    <p className="fichaLinha">
+      <span>{nomeDaReferencia(linha.insumo)}</span>
+      <strong>{emLatas ? `${linha.ml} lata` : `${linha.ml} ml`}</strong>
+      {linha.obs && <em>{linha.obs}</em>}
+    </p>
+  );
+}
+
+function FichaCoquetel({ coquetel, aberto, onToggle }) {
+  const totalBatch = totalDoBatch(coquetel.id);
+  const totalServico = totalDoServico(coquetel.id);
+  const pendentes = pendenciasDoCoquetel(coquetel);
+  const foraDaOP = batchavelForaDaOP(coquetel);
+
+  return (
+    <article className={`fichaCard ${aberto ? "isOpen" : ""}`}>
+      <button className="fichaHead" type="button" onClick={onToggle}>
+        <div>
+          <h2>{coquetel.nome}</h2>
+          <span>
+            {coquetel.preBatch
+              ? `Pré-batch · par ${coquetel.parLitros} L (${parEmGaloes(coquetel.id)} galões)`
+              : "Montado na hora"}
+            {totalBatch ? ` · ${totalBatch} ml/dose · ${dosesPorGalao(coquetel.id)} doses/galão` : ""}
+          </span>
+        </div>
+        <em>{aberto ? "−" : "+"}</em>
+      </button>
+      {aberto && (
+        <div className="fichaBody">
+          {totalBatch > 0 && (
+            <section className="fichaBloco batch">
+              <h3>Vai no batch</h3>
+              {coquetel.batch.map((linha) => <LinhaReceita key={linha.insumo} linha={linha} />)}
+              <p className="fichaLinha total">
+                <span>Total por dose</span>
+                <strong>{totalBatch} ml</strong>
+              </p>
+            </section>
+          )}
+
+          <section className="fichaBloco servico">
+            <h3>{totalBatch ? "Entra no serviço" : "Montagem no serviço"}</h3>
+            {estaEmAberto(coquetel.servico) ? (
+              <p className="fichaCampo emAberto"><span>Composição</span>EM ABERTO</p>
+            ) : coquetel.servico.length ? (
+              <>
+                {coquetel.servico.map((linha) => <LinhaReceita key={linha.insumo} linha={linha} />)}
+                {servicoTemTotal(coquetel.id) && (
+                  <p className="fichaLinha total">
+                    <span>Total por dose</span>
+                    <strong>{totalServico} ml</strong>
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="miniText">Pré-batch 100% — nada é acrescentado na hora.</p>
+            )}
+          </section>
+
+          <CampoFicha rotulo="Método" valor={coquetel.metodo} />
+          <CampoFicha rotulo="Copo" valor={coquetel.copo} />
+          <CampoFicha rotulo="Garnish" valor={coquetel.garnish} />
+          {coquetel.preBatch && <CampoFicha rotulo="Validade do batch" valor={`${validadeDias(coquetel.id)} dias a partir da produção`} />}
+
+          {foraDaOP && (
+            <p className="fichaPendencia">
+              Tem parte batcheável, mas está fora da rotação da ordem de produção: montado na hora,
+              sem par definido. A ficha ainda o classifica como pré-batch.
+            </p>
+          )}
+          {pendentes.length > 0 && (
+            <p className="fichaPendencia">⚠ Falta preencher: {pendentes.join(", ")}.</p>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function FichaProducao({ producao, aberto, onToggle }) {
+  const fatores = fatoresDe(producao.id);
+  const galoes = rendimentoEmGaloes(producao.id);
+  const pendentes = pendenciasDaProducao(producao);
+  const intermediaria = ehIntermediaria(producao.id);
+
+  return (
+    <article className={`fichaCard ${aberto ? "isOpen" : ""}`}>
+      <button className="fichaHead" type="button" onClick={onToggle}>
+        <div>
+          <h2>{producao.nome}</h2>
+          <span>
+            Rende {producao.rendimento / 1000} L · {validadeDias(producao.id)} dias
+            {intermediaria ? " · insumo de outra produção" : ""}
+          </span>
+        </div>
+        <em>{aberto ? "−" : "+"}</em>
+      </button>
+      {aberto && (
+        <div className="fichaBody">
+          <section className="fichaBloco batch">
+            <h3>Receita</h3>
+            {fatores.map((linha) => (
+              <p className="fichaLinha" key={linha.chave}>
+                <span>{linha.nome}</span>
+                <strong>{linha.qtd} {linha.unidade}</strong>
+                <em>{roundCount(linha.porLitro)} {linha.unidade}/L</em>
+              </p>
+            ))}
+            <p className="fichaLinha total">
+              <span>Rendimento</span>
+              <strong>{producao.rendimento} ml</strong>
+              <em>{roundCount(galoes)} galão de 5 L</em>
+            </p>
+          </section>
+
+          <CampoFicha rotulo="Método" valor={producao.metodo} />
+          <CampoFicha rotulo="Conservação" valor={producao.conservacao} />
+          <CampoFicha rotulo="Validade" valor={`${validadeDias(producao.id)} dias`} />
+          {producao.perda && <CampoFicha rotulo="Perda" valor={producao.perda} />}
+          {producao.observacao && <CampoFicha rotulo="Observação" valor={producao.observacao} />}
+          <p className="miniText">Etiqueta obrigatória: data de produção + data de validade.</p>
+
+          {intermediaria && (
+            <p className="miniText">
+              Consumido por outra produção — produzir antes do que depende dele.
+            </p>
+          )}
+          {pendentes.length > 0 && (
+            <p className="fichaPendencia">⚠ Falta preencher: {pendentes.join(", ")}.</p>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+// Leitura de MOVIMENTOS enquanto a Fase 2 acumula histórico. Não é o painel
+// da Fase 5 — é o mínimo para conferir que o espelho está gravando certo.
+function MovementsScreen({ products, onNotify }) {
+  const [aba, setAba] = useState("saldos");
+  const [saldos, setSaldos] = useState([]);
+  const [movimentos, setMovimentos] = useState([]);
+  const [local, setLocal] = useState("");
+  const [busca, setBusca] = useState("");
+  const [carregando, setCarregando] = useState(false);
+  const [status, setStatus] = useState("");
+
+  const nomePorId = useMemo(() => new Map(products.map((product) => [product.id, product.nome])), [products]);
+  const nomeDe = (produtoId) => nomePorId.get(produtoId) || produtoId;
+
+  async function carregar() {
+    setCarregando(true);
+    setStatus("Consultando a planilha...");
+    try {
+      const [saldosResultado, movimentosResultado] = await Promise.all([
+        consultarSaldos(),
+        listarMovimentos(local ? { local } : {}),
+      ]);
+      setSaldos(saldosResultado);
+      setMovimentos(movimentosResultado);
+      setStatus(`${saldosResultado.length} produto(s) com saldo · ${movimentosResultado.length} movimento(s).`);
+    } catch (error) {
+      setStatus(error.message || "Falha ao consultar MOVIMENTOS.");
+      onNotify(error.message || "Falha ao consultar MOVIMENTOS.");
+    } finally {
+      setCarregando(false);
+    }
+  }
+
+  useEffect(() => { carregar(); }, [local]);
+
+  const query = busca.trim().toLowerCase();
+  const saldosVisiveis = saldos
+    .filter((saldo) => !query || nomeDe(saldo.produtoId).toLowerCase().includes(query))
+    .filter((saldo) => !local || numberValue(saldo.locais[local]))
+    .sort((a, b) => nomeDe(a.produtoId).localeCompare(nomeDe(b.produtoId), "pt-BR"));
+
+  const movimentosVisiveis = movimentos
+    .filter((movimento) => !query || nomeDe(movimento.produtoId).toLowerCase().includes(query))
+    .slice()
+    .reverse()
+    .slice(0, 200);
+
+  // A quebra do período é a soma dos ajustes que as contagens geraram.
+  const quebra = roundCount(movimentos
+    .filter((movimento) => movimento.tipo === "AJUSTE")
+    .reduce((total, movimento) => total + numberValue(movimento.qtd), 0));
+
+  return (
+    <main className="screen">
+      <h1>Movimentos</h1>
+      <p className="miniText">
+        Saldo é sempre calculado: soma do que entrou menos o que saiu de cada local. As linhas
+        de CONTAGEM registram a conferência e ficam fora da conta; quem move o saldo é o AJUSTE
+        que a contagem gera, e é ele que mede a quebra.
+      </p>
+      <div className="quickFilters">
+        <button className={aba === "saldos" ? "selected" : ""} onClick={() => setAba("saldos")}>Saldos</button>
+        <button className={aba === "movimentos" ? "selected" : ""} onClick={() => setAba("movimentos")}>Lançamentos</button>
+      </div>
+      <div className="filterGrid">
+        <Input label="Produto" value={busca} onChange={setBusca} placeholder="Buscar por nome" />
+        <Select label="Local" value={local} onChange={setLocal} options={["", ...CODIGOS_LOCAIS]} />
+      </div>
+      <div className="summaryGrid">
+        <Metric label="Produtos" value={saldosVisiveis.length} />
+        <Metric label="Movimentos" value={movimentos.length} />
+        <Metric label="Quebra acumulada" value={quebra} />
+      </div>
+      <div className="bottomActions inline">
+        <button className="ghostButton" onClick={carregar} disabled={carregando}>{carregando ? "Atualizando..." : "Atualizar"}</button>
+      </div>
+      {status && <p className="miniText">{status}</p>}
+
+      {aba === "saldos" && (
+        <>
+          {!saldosVisiveis.length && <EmptyState title="Nenhum saldo ainda" text="Envie uma contagem para MOVIMENTOS começar a acumular." />}
+          <div className="list">
+            {saldosVisiveis.map((saldo) => (
+              <article className="historyCard" key={saldo.produtoId}>
+                <div>
+                  <h3>{nomeDe(saldo.produtoId)}</h3>
+                  <p>
+                    {Object.keys(saldo.locais)
+                      .filter((codigo) => saldo.locais[codigo])
+                      .map((codigo) => `${codigo}: ${saldo.locais[codigo]}`)
+                      .join(" · ") || "sem saldo em nenhum local"}
+                  </p>
+                </div>
+                <strong className="stockQty">{local ? numberValue(saldo.locais[local]) : saldo.consolidado}</strong>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
+
+      {aba === "movimentos" && (
+        <>
+          {!movimentosVisiveis.length && <EmptyState title="Nenhum movimento" text="As contagens enviadas aparecem aqui." />}
+          <div className="list">
+            {movimentosVisiveis.map((movimento) => (
+              <article className="historyCard" key={movimento.movId}>
+                <div>
+                  <h3>{nomeDe(movimento.produtoId)}</h3>
+                  <p>
+                    {movimento.qtd > 0 ? "+" : ""}{movimento.qtd} {movimento.unidade}
+                    {movimento.origem ? ` · de ${movimento.origem}` : ""}
+                    {movimento.destino ? ` · para ${movimento.destino}` : ""}
+                  </p>
+                  <p>{new Date(movimento.timestamp).toLocaleString("pt-BR")}{movimento.usuarioId ? ` · ${movimento.usuarioId}` : ""}</p>
+                  {movimento.obs && <p>{movimento.obs}</p>}
+                  <span className={`status ${movimento.tipo === "AJUSTE" ? "warn" : ""}`}>{movimento.tipo}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+          {movimentos.length > movimentosVisiveis.length && (
+            <p className="miniText">Mostrando os 200 mais recentes de {movimentos.length}.</p>
+          )}
+        </>
+      )}
     </main>
   );
 }
