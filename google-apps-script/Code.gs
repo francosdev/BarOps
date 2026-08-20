@@ -99,9 +99,19 @@ function doPost(e) {
     if (!items.length) throw new Error("Nenhum item recebido.");
 
     const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-    appendRawLog(ss, payload, "RECEBIDO");
     const sheet = ss.getSheetByName(sheetName);
     if (!sheet) throw new Error("Aba nao encontrada: " + sheetName);
+
+    // Abertura vai para a coluna "Abre"; fechamento e inventario geral vao
+    // para "Fecha".
+    //
+    // Resolvido ANTES do log e ANTES do lock, de proposito: so le cabecalho e
+    // pode falhar. Se falhasse com o lock ja tomado, o release estaria no
+    // finally do try la embaixo e nao rodaria; e se falhasse depois do log,
+    // deixaria em LOG_APP uma linha RECEBIDO sem gravacao correspondente.
+    const coluna = colunaDoInventario(sheet, payload.tipo);
+
+    appendRawLog(ss, payload, "RECEBIDO " + coluna.nome);
 
     // Evita que dois dispositivos gravando ao mesmo tempo percam somas.
     const lock = LockService.getScriptLock();
@@ -112,7 +122,6 @@ function doPost(e) {
     const ignored = [];
     try {
       const lastRow = sheet.getLastRow();
-      const fechaColumn = findHeaderColumn(sheet, "Fecha") || 3;
       const productRange = sheet.getRange(1, 1, lastRow, 1);
       const productValues = productRange.getValues().map((row) => normalizeName(row[0]));
 
@@ -124,15 +133,18 @@ function doPost(e) {
       // contribuiu em cada linha. Reenviar o mesmo inventoryId desconta a
       // contribuicao anterior antes de somar a nova — regrava, nao acumula.
       // Sem isso, reenviar a contagem do Wallace levava Agua 1802 -> 1804.
+      // Tudo que controla soma e reenvio e por (aba, COLUNA, dia). Sem a
+      // coluna na chave, gravar a abertura marcaria a linha como "ja escrita
+      // hoje" e o fechamento seguinte somaria em cima em vez de substituir.
       const props = PropertiesService.getScriptProperties();
       const dayKey = "ultimaData_" + sheetName;
-      const rowsKey = "linhasGravadas_" + sheetName;
+      const rowsKey = "linhasGravadas_" + sheetName + "_" + coluna.nome;
       const payloadDate = String(payload.data || "");
       const inventoryId = String(payload.inventoryId || "sem-id");
       const isNewDay = props.getProperty(dayKey) !== payloadDate;
       if (isNewDay) limparContribuicoes(props, sheetName);
       const writtenRows = isNewDay ? {} : JSON.parse(props.getProperty(rowsKey) || "{}");
-      const contribKey = chaveContribuicao(sheetName, inventoryId);
+      const contribKey = chaveContribuicao(sheetName, coluna.nome, inventoryId);
       const contribuicoes = isNewDay ? {} : JSON.parse(props.getProperty(contribKey) || "{}");
 
       items.forEach((item) => {
@@ -149,7 +161,7 @@ function doPost(e) {
           return;
         }
         const row = rowIndex + 1;
-        const cell = sheet.getRange(row, fechaColumn);
+        const cell = sheet.getRange(row, coluna.indice);
         const atual = writtenRows[row] ? Number(cell.getValue()) || 0 : 0;
         const anterior = Number(contribuicoes[row] || 0);
         const nova = Number(item.quantidade || 0);
@@ -191,6 +203,7 @@ function doPost(e) {
     return jsonResponse({
       ok: true,
       sheet: sheetName,
+      coluna: coluna.nome,
       writtenCount: written.length,
       missing,
       ignored,
@@ -675,17 +688,20 @@ function novoId(prefixo) {
   return prefixo + "-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8);
 }
 
-function chaveContribuicao(sheetName, inventoryId) {
-  return "contrib_" + sheetName + "_" + inventoryId;
+function chaveContribuicao(sheetName, colunaNome, inventoryId) {
+  return "contrib_" + sheetName + "_" + colunaNome + "_" + inventoryId;
 }
 
 // Vira o dia: as contribuicoes do dia anterior nao servem mais e sairiam
-// estourando o limite de Script Properties com o tempo.
+// estourando o limite de Script Properties com o tempo. Limpa as duas
+// colunas de uma vez, porque o prefixo nao inclui o nome da coluna.
 function limparContribuicoes(props, sheetName) {
   const prefixo = "contrib_" + sheetName + "_";
   props.getKeys().forEach(function (chave) {
     if (chave.indexOf(prefixo) === 0) props.deleteProperty(chave);
   });
+  // Chave do formato antigo, de antes do roteamento por coluna.
+  props.deleteProperty("linhasGravadas_" + sheetName);
 }
 
 // ---------------------------------------------------------------------------
@@ -721,6 +737,26 @@ function findProductRow(productValues, productName) {
     return value.includes(productName) || productName.includes(value);
   });
   return rowIndex;
+}
+
+// A tela de contagem coleta UM numero por produto; e o tipo do inventario que
+// decide em qual coluna ele entra. Ate agora tudo caia em "Fecha", entao uma
+// contagem de abertura sobrescrevia o fechamento da semana.
+//
+// Sem coluna "Abre" na aba, a gravacao falha alto em vez de cair em "Fecha" —
+// gravar abertura em cima de fechamento e exatamente o bug que isto conserta.
+function colunaDoInventario(sheet, tipo) {
+  if (normalizeName(tipo).indexOf("abertura") === 0) {
+    const abre = findHeaderColumn(sheet, "Abre");
+    if (!abre) {
+      throw new Error(
+        "A aba " + sheet.getName() + " nao tem coluna \"Abre\". A contagem de abertura nao " +
+        "foi gravada para nao sobrescrever o fechamento."
+      );
+    }
+    return { indice: abre, nome: "Abre" };
+  }
+  return { indice: findHeaderColumn(sheet, "Fecha") || 3, nome: "Fecha" };
 }
 
 function findHeaderColumn(sheet, headerName) {

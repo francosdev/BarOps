@@ -6,6 +6,7 @@ import {
   DEFAULT_INTEGRATION,
   bootstrap,
   consultarSaldos,
+  gravarMovimentos,
   isAppsScriptWebAppUrl,
   listarCatalogo,
   listarMovimentos,
@@ -15,6 +16,7 @@ import {
   salvarUsuarios,
 } from "./lib/api.js";
 import { entrar, carregarSessao, limparSessao, salvarSessao } from "./lib/auth.js";
+import { explodirCascata, resumoDaCascata } from "./lib/fichas/cascata.js";
 import {
   COQUETEIS,
   PRODUCOES,
@@ -47,9 +49,22 @@ const FRACTIONS = [0, 0.25, 0.3, 0.5, 0.7, 0.75];
 
 const WITHDRAWAL_REASONS = ["Produção", "Quebra", "Perda", "Evento", "Consumo Interno", "Outro"];
 
-// Retirada de estoque desativada temporariamente (julho/2026) enquanto o
-// fluxo é repensado; para reativar, basta trocar para true.
-const WITHDRAWAL_ENABLED = false;
+// O motivo da retirada decide o tipo do movimento e para onde ele vai.
+// Destino vazio significa que a quantidade sai do sistema: quebra e consumo
+// interno não viram estoque em lugar nenhum.
+const MOTIVO_MOVIMENTO = {
+  "Produção": { tipo: "REQUISICAO", destino: "PRODUCAO" },
+  "Quebra": { tipo: "PERDA", destino: "" },
+  "Perda": { tipo: "PERDA", destino: "" },
+  "Evento": { tipo: "EVENTO", destino: "EVENTO" },
+  "Consumo Interno": { tipo: "CONSUMO", destino: "" },
+  "Outro": { tipo: "AJUSTE", destino: "" },
+};
+
+// Religada em 20/08/2026, agora gravando em MOVIMENTOS. A versão antiga
+// descontava direto do estoqueAtual do produto — um módulo com estoque
+// próprio, que é exatamente o que a Fase 1 veio eliminar.
+const WITHDRAWAL_ENABLED = true;
 
 // Fase 2 do escopo (ligada em 20/08/2026): a contagem continua gravando onde
 // grava hoje e passa a gravar também em MOVIMENTOS. Cada produto contado vira
@@ -1084,31 +1099,31 @@ function App() {
     return { updated, total: itens.length };
   }
 
-  function registerWithdrawal({ produtoId, quantidade, motivo, observacao }) {
+  // A retirada vira um movimento em MOVIMENTOS; o saldo do local cai por
+  // consequência. Se a planilha não aceitar, a retirada NÃO aconteceu — não
+  // dá para fingir localmente que o estoque baixou.
+  async function registerWithdrawal({ produtoId, quantidade, motivo, observacao, local }) {
     const product = products.find((item) => item.id === produtoId);
-    if (!product) return;
-    setProducts((current) => current.map((item) => (
-      item.id === produtoId
-        ? { ...item, estoqueAtual: roundCount(numberValue(item.estoqueAtual) - quantidade) }
-        : item
-    )));
-    setMovements((current) => [
-      {
-        id: uid("mov"),
-        tipo: "retirada",
+    if (!product) return { ok: false, error: "Produto não encontrado." };
+    const regra = MOTIVO_MOVIMENTO[motivo] || MOTIVO_MOVIMENTO.Outro;
+    try {
+      await gravarMovimentos([{
+        movId: uid("mov"),
+        tipo: regra.tipo,
+        origem: local,
+        destino: regra.destino,
         produtoId,
-        produto: product.nome,
-        categoria: getOperationalCategory(product),
-        quantidade,
+        qtd: quantidade,
         unidade: product.unidade,
-        motivo,
-        observacao,
-        dataHora: new Date().toISOString(),
-        usuario: leader,
-      },
-      ...current,
-    ]);
-    notify(`Retirada registrada: ${product.nome} − ${quantidade} ${product.unidade}`);
+        usuarioId: currentUser?.id || leader,
+        refDocumento: "",
+        obs: [motivo, observacao].filter(Boolean).join(" — "),
+      }]);
+      notify(`${motivo}: ${product.nome} − ${quantidade} ${product.unidade} de ${local}`);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error.message || "Falha ao gravar o movimento na planilha." };
+    }
   }
 
   function openHome() {
@@ -1142,6 +1157,7 @@ function App() {
           onSheetUsers={() => setScreen("sheetUsers")}
           onMovements={() => setScreen("movements")}
           onFichas={() => setScreen("fichas")}
+          onPreBatch={() => setScreen("prebatch")}
         />
       )}
       {screen === "withdrawal" && WITHDRAWAL_ENABLED && (
@@ -1266,6 +1282,7 @@ function App() {
       {screen === "movements" && isAdmin && <MovementsScreen products={products} onNotify={notify} />}
       {/* Ficha técnica é consulta liberada para todos os perfis. */}
       {screen === "fichas" && <FichasScreen />}
+      {screen === "prebatch" && <PreBatchScreen onNotify={notify} />}
       {screen === "integration" && isAdmin && <IntegrationScreen integration={integration} onChange={setIntegration} />}
       {["history", "details", "products", "users", "integration", "stock", "base", "sheetUsers", "movements"].includes(screen) && !isAdmin && (
         <HomeScreen
@@ -1276,6 +1293,7 @@ function App() {
           onResume={() => setScreen("count")}
           onWithdrawal={() => setScreen("withdrawal")}
           onFichas={() => setScreen("fichas")}
+          onPreBatch={() => setScreen("prebatch")}
         />
       )}
     </div>
@@ -1340,7 +1358,7 @@ function LoginScreen({ onLogin }) {
   );
 }
 
-function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, onStock, onHistory, onProducts, onUsers, onIntegration, onBase, onSheetUsers, onMovements, onFichas }) {
+function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, onStock, onHistory, onProducts, onUsers, onIntegration, onBase, onSheetUsers, onMovements, onFichas, onPreBatch }) {
   return (
     <main className="screen">
       <p className="eyebrow">Olá, {user?.nome}.</p>
@@ -1351,6 +1369,7 @@ function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, on
         <Button onClick={onNew}>Novo inventário</Button>
         {/* Consulta liberada para todos os perfis. */}
         <Button onClick={onFichas} variant="secondary">Fichas técnicas</Button>
+        <Button onClick={onPreBatch} variant="secondary">Calculadora de pré-batch</Button>
         {WITHDRAWAL_ENABLED && <Button onClick={onWithdrawal} variant="secondary">Retirada de estoque</Button>}
         {isAdmin && <Button onClick={onStock} variant="secondary">Estoque atual</Button>}
         {isAdmin && <Button onClick={onMovements} variant="secondary">Movimentos</Button>}
@@ -2000,8 +2019,10 @@ function WithdrawalScreen({ products, onConfirm, onBack }) {
   const [selectedId, setSelectedId] = useState("");
   const [quantidade, setQuantidade] = useState(0);
   const [motivo, setMotivo] = useState("");
+  const [local, setLocal] = useState("GERAL");
   const [observacao, setObservacao] = useState("");
   const [error, setError] = useState("");
+  const [gravando, setGravando] = useState(false);
   const query = search.trim().toLowerCase();
   const available = products.filter((product) => product.ativo);
   const matches = query
@@ -2009,7 +2030,7 @@ function WithdrawalScreen({ products, onConfirm, onBack }) {
     : [];
   const selected = available.find((product) => product.id === selectedId);
 
-  function confirm() {
+  async function confirm() {
     if (!selected) {
       setError("Selecione o produto.");
       return;
@@ -2023,13 +2044,31 @@ function WithdrawalScreen({ products, onConfirm, onBack }) {
       setError("Selecione o motivo da retirada.");
       return;
     }
-    const stock = numberValue(selected.estoqueAtual);
-    if (amount > stock) {
-      const ok = window.confirm(`O estoque atual de ${selected.nome} é ${stock} ${selected.unidade}. A retirada de ${amount} deixará o estoque negativo. Confirmar mesmo assim?`);
+    if (!local) {
+      setError("Selecione de qual local a retirada sai.");
+      return;
+    }
+    // Referência do último saldo conhecido no aparelho. O saldo de verdade
+    // é a soma de MOVIMENTOS; isto aqui só evita um erro de digitação óbvio.
+    const referencia = numberValue(selected.estoqueAtual);
+    if (referencia && amount > referencia) {
+      const ok = window.confirm(`O último saldo conhecido de ${selected.nome} é ${referencia} ${selected.unidade}. Retirar ${amount} deixa o saldo negativo. Confirmar mesmo assim?`);
       if (!ok) return;
     }
     setError("");
-    onConfirm({ produtoId: selected.id, quantidade: amount, motivo, observacao: observacao.trim() });
+    setGravando(true);
+    const resultado = await onConfirm({
+      produtoId: selected.id,
+      quantidade: amount,
+      motivo,
+      local,
+      observacao: observacao.trim(),
+    });
+    setGravando(false);
+    if (!resultado?.ok) {
+      setError(resultado?.error || "Não foi possível gravar. A retirada não foi registrada.");
+      return;
+    }
     setSelectedId("");
     setSearch("");
     setQuantidade(0);
@@ -2066,14 +2105,25 @@ function WithdrawalScreen({ products, onConfirm, onBack }) {
             </div>
             <button className="ghostButton compact" onClick={() => setSelectedId("")}>Trocar produto</button>
             <NumberField label={`Quantidade retirada (${selected.unidade})`} value={quantidade} onChange={setQuantidade} />
+            <Select label="Sai de qual local" value={local} onChange={setLocal} options={CODIGOS_LOCAIS} />
             <Picker label="Motivo" options={WITHDRAWAL_REASONS} value={motivo} onChange={setMotivo} />
+            {motivo && (
+              <p className="miniText">
+                Grava como <strong>{MOTIVO_MOVIMENTO[motivo].tipo}</strong>
+                {MOTIVO_MOVIMENTO[motivo].destino
+                  ? ` — sai de ${local} e entra em ${MOTIVO_MOVIMENTO[motivo].destino}.`
+                  : ` — sai de ${local} e deixa o sistema.`}
+              </p>
+            )}
             <Input label="Observações" value={observacao} onChange={setObservacao} placeholder="Opcional" />
           </>
         )}
         {error && <p className="error">{error}</p>}
         <div className="bottomActions inline">
           <button className="ghostButton" onClick={onBack}>Voltar</button>
-          <Button onClick={confirm} disabled={!selected}>Confirmar retirada</Button>
+          <Button onClick={confirm} disabled={!selected || gravando}>
+            {gravando ? "Gravando..." : "Confirmar retirada"}
+          </Button>
         </div>
       </section>
     </main>
@@ -2432,6 +2482,163 @@ function SheetUsersScreen({ onNotify }) {
         ))}
       </div>
     </main>
+  );
+}
+
+// Os produtos que a ficha exige entram no catálogo com id "ficha-<chave>".
+// É por aqui que o saldo em MOVIMENTOS volta a falar a língua da receita.
+function chaveDaFicha(produtoId) {
+  return String(produtoId || "").startsWith("ficha-") ? String(produtoId).slice(6) : null;
+}
+
+const emLitros = (ml) => roundCount(ml / 1000);
+
+// 38190.48 ml não se lê na bancada. Acima de mil, sobe para litro ou quilo.
+function quantidadeLegivel(valor, unidade) {
+  if (unidade === "ml" && valor >= 1000) return `${roundCount(valor / 1000)} L`;
+  if (unidade === "g" && valor >= 1000) return `${roundCount(valor / 1000)} kg`;
+  return `${roundCount(valor)} ${unidade}`;
+}
+
+// Calculadora de pré-batch (Fase 4, B1). Compara o saldo em PRODUCAO contra o
+// par de cada pré-batch, explode a cascata de dois níveis e diz o que produzir,
+// o que subir do estoque e quanto de insumo base comprar.
+//
+// Nenhum saldo é guardado aqui: tudo vem da soma de MOVIMENTOS.
+function PreBatchScreen({ onNotify }) {
+  const [arredondamento, setArredondamento] = useState("litro");
+  const [saldos, setSaldos] = useState(null);
+  const [carregando, setCarregando] = useState(false);
+  const [status, setStatus] = useState("");
+
+  async function carregar() {
+    setCarregando(true);
+    setStatus("Consultando o saldo em PRODUCAO...");
+    try {
+      const lista = await consultarSaldos();
+      const porChave = {};
+      lista.forEach((saldo) => {
+        const chave = chaveDaFicha(saldo.produtoId);
+        if (chave) porChave[chave] = numberValue(saldo.locais?.PRODUCAO);
+      });
+      setSaldos(porChave);
+      const comSaldo = Object.values(porChave).filter(Boolean).length;
+      setStatus(comSaldo
+        ? `${comSaldo} item(ns) com saldo em PRODUCAO.`
+        : "Nenhum saldo em PRODUCAO — a sugestão sai com o par cheio.");
+    } catch (error) {
+      setStatus(error.message || "Falha ao consultar saldos.");
+      onNotify(error.message || "Falha ao consultar saldos.");
+    } finally {
+      setCarregando(false);
+    }
+  }
+
+  useEffect(() => { carregar(); }, []);
+
+  const resultado = useMemo(
+    () => explodirCascata({ saldos: saldos || {}, arredondamento }),
+    [saldos, arredondamento]
+  );
+  const resumo = resumoDaCascata(resultado);
+  const preBatches = resultado.preBatches.filter((lote) => lote.produzir);
+  const producoes = resultado.producoes.filter((lote) => lote.produzir);
+
+  return (
+    <main className="screen">
+      <h1>Calculadora de pré-batch</h1>
+      <p className="miniText">
+        Déficit contra o par, arredondado em lote fechado; a demanda de produção sai em
+        volume exato, porque a receita escala. A prateleira de serviço soma à cascata.
+      </p>
+
+      <section className="panel stack">
+        <Picker
+          label="Arredondar pré-batch em"
+          options={["litro", "galao"]}
+          value={arredondamento}
+          onChange={setArredondamento}
+        />
+        <div className="bottomActions inline">
+          <button className="ghostButton" onClick={carregar} disabled={carregando}>
+            {carregando ? "Consultando..." : "Atualizar saldo"}
+          </button>
+        </div>
+        {status && <p className="miniText">{status}</p>}
+      </section>
+
+      <div className="summaryGrid">
+        <Metric label="Pré-batches" value={resumo.preBatches} />
+        <Metric label="Produções" value={resumo.producoes} />
+        <Metric label="Litros no total" value={resumo.litros} />
+      </div>
+
+      <BlocoCascata titulo="Produzir — pré-batch" vazio="Todos os pré-batches estão no par.">
+        {preBatches.map((lote) => (
+          <article className="historyCard" key={lote.chave}>
+            <div>
+              <h3>{lote.nome}</h3>
+              <p>
+                Par {emLitros(lote.par)} L · saldo {emLitros(lote.saldo)} L · déficit {emLitros(lote.deficit)} L
+              </p>
+            </div>
+            <strong className="stockQty">{emLitros(lote.produzir)} L</strong>
+          </article>
+        ))}
+      </BlocoCascata>
+
+      <BlocoCascata titulo="Produzir — xaropes e extratos" vazio="Nenhuma produção necessária.">
+        {producoes.map((lote) => (
+          <article className="historyCard" key={lote.chave}>
+            <div>
+              <h3>{lote.nome}</h3>
+              <p>
+                Necessário {emLitros(lote.necessario)} L · saldo {emLitros(lote.saldo)} L
+                {" · validade "}{validadeDias(lote.chave)} dias
+              </p>
+            </div>
+            <strong className="stockQty">{emLitros(lote.produzir)} L</strong>
+          </article>
+        ))}
+      </BlocoCascata>
+
+      <BlocoCascata titulo="Subir do estoque" vazio="Nada a subir.">
+        {resultado.separacao.map((linha) => (
+          <article className="historyCard" key={linha.chave}>
+            <div>
+              <h3>{linha.nome}</h3>
+              <p>{quantidadeLegivel(linha.qtdReceita, linha.unidadeReceita)} na receita</p>
+            </div>
+            <strong className="stockQty">{linha.unidades} {linha.unidadeEstoque}</strong>
+          </article>
+        ))}
+      </BlocoCascata>
+
+      <BlocoCascata titulo="Insumos base" vazio="Nenhum insumo base.">
+        {resultado.insumosBase.map((linha) => (
+          <article className="historyCard" key={linha.chave}>
+            <div>
+              <h3>{linha.nome}</h3>
+              <p>
+                {quantidadeLegivel(linha.qtdReceita, linha.unidadeReceita)}
+                {linha.embalagemFechada ? " · embalagem fechada" : " · a granel"}
+              </p>
+            </div>
+            <strong className="stockQty">{linha.unidades} {linha.unidadeEstoque}</strong>
+          </article>
+        ))}
+      </BlocoCascata>
+    </main>
+  );
+}
+
+function BlocoCascata({ titulo, vazio, children }) {
+  const itens = React.Children.toArray(children);
+  return (
+    <section>
+      <p className="label">{titulo}</p>
+      {itens.length ? <div className="list">{itens}</div> : <p className="miniText">{vazio}</p>}
+    </section>
   );
 }
 
