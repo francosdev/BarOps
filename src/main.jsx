@@ -6,7 +6,10 @@ import {
   DEFAULT_INTEGRATION,
   bootstrap,
   consultarSaldos,
+  criarRequisicao,
   gravarMovimentos,
+  listarRequisicoes,
+  separarRequisicao,
   isAppsScriptWebAppUrl,
   listarCatalogo,
   listarMovimentos,
@@ -16,7 +19,7 @@ import {
   salvarUsuarios,
 } from "./lib/api.js";
 import { entrar, carregarSessao, limparSessao, salvarSessao } from "./lib/auth.js";
-import { explodirCascata, resumoDaCascata } from "./lib/fichas/cascata.js";
+import { explodirAvulso, explodirCascata, resumoDaCascata } from "./lib/fichas/cascata.js";
 import {
   COQUETEIS,
   PRODUCOES,
@@ -30,6 +33,7 @@ import {
   parEmGaloes,
   pendenciasDaProducao,
   pendenciasDoCoquetel,
+  preBatches,
   produtosExigidos,
   rendimentoEmGaloes,
   resumoDePendencias,
@@ -38,7 +42,7 @@ import {
   totalDoServico,
   validadeDias,
 } from "./lib/fichas/index.js";
-import { CODIGOS_LOCAIS, CODIGOS_PERFIS, PERFIS, SETOR_PARA_LOCAL, ehAdmin, normalizarPerfis, rotuloPerfis } from "./lib/perfis.js";
+import { CODIGOS_LOCAIS, CODIGOS_PERFIS, PERFIS, SETOR_PARA_LOCAL, ehAdmin, normalizarPerfis, podeUsuario, rotuloPerfis } from "./lib/perfis.js";
 import { STORAGE_KEYS, loadJson, saveJson } from "./lib/storage.js";
 import "./styles.css";
 
@@ -47,12 +51,16 @@ const INVENTORY_TYPES = ["Abertura", "Fechamento", "Inventário geral"];
 const SHIFTS = ["Dia", "Noite"];
 const FRACTIONS = [0, 0.25, 0.3, 0.5, 0.7, 0.75];
 
-const WITHDRAWAL_REASONS = ["Produção", "Quebra", "Perda", "Evento", "Consumo Interno", "Outro"];
+const WITHDRAWAL_REASONS = ["Repondo bar", "Produção", "Quebra", "Perda", "Evento", "Consumo Interno", "Outro"];
 
 // O motivo da retirada decide o tipo do movimento e para onde ele vai.
+//
 // Destino vazio significa que a quantidade sai do sistema: quebra e consumo
-// interno não viram estoque em lugar nenhum.
+// interno não viram estoque em lugar nenhum. Destino null significa que o
+// operador escolhe — é o caso da reposição, que é transferência entre locais
+// e não saída: a garrafa some do GERAL e aparece no bar.
 const MOTIVO_MOVIMENTO = {
+  "Repondo bar": { tipo: "REQUISICAO", destino: null },
   "Produção": { tipo: "REQUISICAO", destino: "PRODUCAO" },
   "Quebra": { tipo: "PERDA", destino: "" },
   "Perda": { tipo: "PERDA", destino: "" },
@@ -60,6 +68,10 @@ const MOTIVO_MOVIMENTO = {
   "Consumo Interno": { tipo: "CONSUMO", destino: "" },
   "Outro": { tipo: "AJUSTE", destino: "" },
 };
+
+// Para onde se repõe: os pontos de venda. GERAL é de onde sai, PRODUCAO tem
+// motivo próprio e EVENTO também.
+const DESTINOS_REPOSICAO = ["PRINCIPAL", "BAR22", "BAR23", "CHIVAS"];
 
 // Religada em 20/08/2026, agora gravando em MOVIMENTOS. A versão antiga
 // descontava direto do estoqueAtual do produto — um módulo com estoque
@@ -1102,7 +1114,7 @@ function App() {
   // A retirada vira um movimento em MOVIMENTOS; o saldo do local cai por
   // consequência. Se a planilha não aceitar, a retirada NÃO aconteceu — não
   // dá para fingir localmente que o estoque baixou.
-  async function registerWithdrawal({ produtoId, quantidade, motivo, observacao, local }) {
+  async function registerWithdrawal({ produtoId, quantidade, motivo, observacao, local, destino }) {
     const product = products.find((item) => item.id === produtoId);
     if (!product) return { ok: false, error: "Produto não encontrado." };
     const regra = MOTIVO_MOVIMENTO[motivo] || MOTIVO_MOVIMENTO.Outro;
@@ -1111,7 +1123,8 @@ function App() {
         movId: uid("mov"),
         tipo: regra.tipo,
         origem: local,
-        destino: regra.destino,
+        // Motivo com destino fixo ignora o que veio da tela.
+        destino: regra.destino === null ? destino : regra.destino,
         produtoId,
         qtd: quantidade,
         unidade: product.unidade,
@@ -1119,7 +1132,10 @@ function App() {
         refDocumento: "",
         obs: [motivo, observacao].filter(Boolean).join(" — "),
       }]);
-      notify(`${motivo}: ${product.nome} − ${quantidade} ${product.unidade} de ${local}`);
+      const alvo = regra.destino === null ? destino : regra.destino;
+      notify(alvo
+        ? `${motivo}: ${quantidade} ${product.unidade} de ${product.nome} — ${local} → ${alvo}`
+        : `${motivo}: ${product.nome} − ${quantidade} ${product.unidade} de ${local}`);
       return { ok: true };
     } catch (error) {
       return { ok: false, error: error.message || "Falha ao gravar o movimento na planilha." };
@@ -1158,6 +1174,7 @@ function App() {
           onMovements={() => setScreen("movements")}
           onFichas={() => setScreen("fichas")}
           onPreBatch={() => setScreen("prebatch")}
+          onRequisicoes={() => setScreen("requisicoes")}
         />
       )}
       {screen === "withdrawal" && WITHDRAWAL_ENABLED && (
@@ -1283,6 +1300,8 @@ function App() {
       {/* Ficha técnica é consulta liberada para todos os perfis. */}
       {screen === "fichas" && <FichasScreen />}
       {screen === "prebatch" && <PreBatchScreen onNotify={notify} />}
+      {/* Requisição é liberada para qualquer usuário logado; separar exige perfil. */}
+      {screen === "requisicoes" && <RequisicoesScreen products={products} user={currentUser} onNotify={notify} />}
       {screen === "integration" && isAdmin && <IntegrationScreen integration={integration} onChange={setIntegration} />}
       {["history", "details", "products", "users", "integration", "stock", "base", "sheetUsers", "movements"].includes(screen) && !isAdmin && (
         <HomeScreen
@@ -1294,6 +1313,7 @@ function App() {
           onWithdrawal={() => setScreen("withdrawal")}
           onFichas={() => setScreen("fichas")}
           onPreBatch={() => setScreen("prebatch")}
+          onRequisicoes={() => setScreen("requisicoes")}
         />
       )}
     </div>
@@ -1358,7 +1378,7 @@ function LoginScreen({ onLogin }) {
   );
 }
 
-function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, onStock, onHistory, onProducts, onUsers, onIntegration, onBase, onSheetUsers, onMovements, onFichas, onPreBatch }) {
+function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, onStock, onHistory, onProducts, onUsers, onIntegration, onBase, onSheetUsers, onMovements, onFichas, onPreBatch, onRequisicoes }) {
   return (
     <main className="screen">
       <p className="eyebrow">Olá, {user?.nome}.</p>
@@ -1369,6 +1389,7 @@ function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, on
         <Button onClick={onNew}>Novo inventário</Button>
         {/* Consulta liberada para todos os perfis. */}
         <Button onClick={onFichas} variant="secondary">Fichas técnicas</Button>
+        <Button onClick={onRequisicoes} variant="secondary">Requisições</Button>
         <Button onClick={onPreBatch} variant="secondary">Calculadora de pré-batch</Button>
         {WITHDRAWAL_ENABLED && <Button onClick={onWithdrawal} variant="secondary">Retirada de estoque</Button>}
         {isAdmin && <Button onClick={onStock} variant="secondary">Estoque atual</Button>}
@@ -2020,6 +2041,7 @@ function WithdrawalScreen({ products, onConfirm, onBack }) {
   const [quantidade, setQuantidade] = useState(0);
   const [motivo, setMotivo] = useState("");
   const [local, setLocal] = useState("GERAL");
+  const [destino, setDestino] = useState("PRINCIPAL");
   const [observacao, setObservacao] = useState("");
   const [error, setError] = useState("");
   const [gravando, setGravando] = useState(false);
@@ -2048,6 +2070,15 @@ function WithdrawalScreen({ products, onConfirm, onBack }) {
       setError("Selecione de qual local a retirada sai.");
       return;
     }
+    const pedeDestino = MOTIVO_MOVIMENTO[motivo]?.destino === null;
+    if (pedeDestino && !destino) {
+      setError("Selecione para qual bar vai a reposição.");
+      return;
+    }
+    if (pedeDestino && destino === local) {
+      setError("Origem e destino são o mesmo local. A reposição não move nada.");
+      return;
+    }
     // Referência do último saldo conhecido no aparelho. O saldo de verdade
     // é a soma de MOVIMENTOS; isto aqui só evita um erro de digitação óbvio.
     const referencia = numberValue(selected.estoqueAtual);
@@ -2062,6 +2093,7 @@ function WithdrawalScreen({ products, onConfirm, onBack }) {
       quantidade: amount,
       motivo,
       local,
+      destino,
       observacao: observacao.trim(),
     });
     setGravando(false);
@@ -2107,12 +2139,17 @@ function WithdrawalScreen({ products, onConfirm, onBack }) {
             <NumberField label={`Quantidade retirada (${selected.unidade})`} value={quantidade} onChange={setQuantidade} />
             <Select label="Sai de qual local" value={local} onChange={setLocal} options={CODIGOS_LOCAIS} />
             <Picker label="Motivo" options={WITHDRAWAL_REASONS} value={motivo} onChange={setMotivo} />
+            {MOTIVO_MOVIMENTO[motivo]?.destino === null && (
+              <Select label="Repondo qual bar" value={destino} onChange={setDestino} options={DESTINOS_REPOSICAO} />
+            )}
             {motivo && (
               <p className="miniText">
                 Grava como <strong>{MOTIVO_MOVIMENTO[motivo].tipo}</strong>
-                {MOTIVO_MOVIMENTO[motivo].destino
-                  ? ` — sai de ${local} e entra em ${MOTIVO_MOVIMENTO[motivo].destino}.`
-                  : ` — sai de ${local} e deixa o sistema.`}
+                {MOTIVO_MOVIMENTO[motivo].destino === null
+                  ? ` — transfere de ${local} para ${destino}. Sai do saldo de um e entra no do outro.`
+                  : MOTIVO_MOVIMENTO[motivo].destino
+                    ? ` — sai de ${local} e entra em ${MOTIVO_MOVIMENTO[motivo].destino}.`
+                    : ` — sai de ${local} e deixa o sistema.`}
               </p>
             )}
             <Input label="Observações" value={observacao} onChange={setObservacao} placeholder="Opcional" />
@@ -2500,20 +2537,56 @@ function quantidadeLegivel(valor, unidade) {
   return `${roundCount(valor)} ${unidade}`;
 }
 
-// Calculadora de pré-batch (Fase 4, B1). Compara o saldo em PRODUCAO contra o
-// par de cada pré-batch, explode a cascata de dois níveis e diz o que produzir,
-// o que subir do estoque e quanto de insumo base comprar.
+// Bloco recolhível. Fechado mostra só ícone, nome e quantos itens tem —
+// aberto mostra a lista. Na bancada quase sempre interessa um bloco de cada
+// vez, então tudo nasce fechado menos o primeiro.
+function BlocoDobravel({ icone, titulo, itens, aberto, onToggle, render }) {
+  return (
+    <section className={`bloco ${aberto ? "aberto" : ""}`}>
+      <button type="button" className="blocoHead" onClick={onToggle}>
+        <span className="blocoIcone" aria-hidden="true">{icone}</span>
+        <strong>{titulo}</strong>
+        <span className="blocoContador">{itens.length}</span>
+        <span className="blocoSeta" aria-hidden="true">{aberto ? "▾" : "▸"}</span>
+      </button>
+      {aberto && (
+        itens.length
+          ? <div className="blocoLista">{itens.map(render)}</div>
+          : <p className="blocoVazio">nada aqui</p>
+      )}
+    </section>
+  );
+}
+
+function LinhaCalc({ nome, valor, detalhe }) {
+  return (
+    <p className="linhaCalc">
+      <span>{nome}</span>
+      {detalhe && <em>{detalhe}</em>}
+      <strong>{valor}</strong>
+    </p>
+  );
+}
+
+// Calculadora de pré-batch. Dois modos:
 //
-// Nenhum saldo é guardado aqui: tudo vem da soma de MOVIMENTOS.
+//   Sugestão — compara o saldo em PRODUCAO com o par de cada pré-batch e
+//              explode a cascata. É o cálculo automático, inalterado.
+//   Avulso   — "quero fazer N litros deste aqui": conta de receita pura,
+//              sem saldo e sem par, para quem já decidiu o volume.
 function PreBatchScreen({ onNotify }) {
+  const [modo, setModo] = useState("sugestao");
   const [arredondamento, setArredondamento] = useState("litro");
   const [saldos, setSaldos] = useState(null);
   const [carregando, setCarregando] = useState(false);
-  const [status, setStatus] = useState("");
+  const [erro, setErro] = useState("");
+  const [avulsoId, setAvulsoId] = useState(preBatches()[0]?.id || "");
+  const [avulsoLitros, setAvulsoLitros] = useState(1);
+  const [abertos, setAbertos] = useState({ prebatch: true });
 
   async function carregar() {
     setCarregando(true);
-    setStatus("Consultando o saldo em PRODUCAO...");
+    setErro("");
     try {
       const lista = await consultarSaldos();
       const porChave = {};
@@ -2522,12 +2595,8 @@ function PreBatchScreen({ onNotify }) {
         if (chave) porChave[chave] = numberValue(saldo.locais?.PRODUCAO);
       });
       setSaldos(porChave);
-      const comSaldo = Object.values(porChave).filter(Boolean).length;
-      setStatus(comSaldo
-        ? `${comSaldo} item(ns) com saldo em PRODUCAO.`
-        : "Nenhum saldo em PRODUCAO — a sugestão sai com o par cheio.");
     } catch (error) {
-      setStatus(error.message || "Falha ao consultar saldos.");
+      setErro(error.message || "Falha ao consultar saldos.");
       onNotify(error.message || "Falha ao consultar saldos.");
     } finally {
       setCarregando(false);
@@ -2536,109 +2605,497 @@ function PreBatchScreen({ onNotify }) {
 
   useEffect(() => { carregar(); }, []);
 
-  const resultado = useMemo(
+  const sugestao = useMemo(
     () => explodirCascata({ saldos: saldos || {}, arredondamento }),
     [saldos, arredondamento]
   );
-  const resumo = resumoDaCascata(resultado);
-  const preBatches = resultado.preBatches.filter((lote) => lote.produzir);
-  const producoes = resultado.producoes.filter((lote) => lote.produzir);
+  const avulso = useMemo(
+    () => explodirAvulso({ coquetelId: avulsoId, litros: avulsoLitros }),
+    [avulsoId, avulsoLitros]
+  );
+
+  const ehSugestao = modo === "sugestao";
+  const producoes = (ehSugestao ? sugestao.producoes : avulso.producoes).filter((l) => l.produzir);
+  const separacao = ehSugestao ? sugestao.separacao : avulso.separacao;
+  const insumos = ehSugestao ? sugestao.insumosBase : avulso.insumosBase;
+  const preBatchItens = ehSugestao ? sugestao.preBatches.filter((l) => l.produzir) : avulso.componentes;
+  const resumo = resumoDaCascata(sugestao);
+
+  const alternar = (chave) => setAbertos((atual) => ({ ...atual, [chave]: !atual[chave] }));
 
   return (
-    <main className="screen">
-      <h1>Calculadora de pré-batch</h1>
-      <p className="miniText">
-        Déficit contra o par, arredondado em lote fechado; a demanda de produção sai em
-        volume exato, porque a receita escala. A prateleira de serviço soma à cascata.
-      </p>
-
-      <section className="panel stack">
-        <Picker
-          label="Arredondar pré-batch em"
-          options={["litro", "galao"]}
-          value={arredondamento}
-          onChange={setArredondamento}
-        />
-        <div className="bottomActions inline">
-          <button className="ghostButton" onClick={carregar} disabled={carregando}>
-            {carregando ? "Consultando..." : "Atualizar saldo"}
+    <main className="screen calcScreen">
+      <div className="calcTopo">
+        <h1>Pré-batch</h1>
+        <div className="calcModos">
+          <button className={ehSugestao ? "selected" : ""} onClick={() => setModo("sugestao")} title="Sugestão pelo par">
+            ⚖<span>Sugestão</span>
+          </button>
+          <button className={!ehSugestao ? "selected" : ""} onClick={() => setModo("avulso")} title="Cálculo avulso">
+            🧮<span>Avulso</span>
           </button>
         </div>
-        {status && <p className="miniText">{status}</p>}
-      </section>
-
-      <div className="summaryGrid">
-        <Metric label="Pré-batches" value={resumo.preBatches} />
-        <Metric label="Produções" value={resumo.producoes} />
-        <Metric label="Litros no total" value={resumo.litros} />
       </div>
 
-      <BlocoCascata titulo="Produzir — pré-batch" vazio="Todos os pré-batches estão no par.">
-        {preBatches.map((lote) => (
-          <article className="historyCard" key={lote.chave}>
-            <div>
-              <h3>{lote.nome}</h3>
-              <p>
-                Par {emLitros(lote.par)} L · saldo {emLitros(lote.saldo)} L · déficit {emLitros(lote.deficit)} L
-              </p>
-            </div>
-            <strong className="stockQty">{emLitros(lote.produzir)} L</strong>
-          </article>
-        ))}
-      </BlocoCascata>
+      {ehSugestao ? (
+        <div className="calcControles">
+          <div className="quickFilters compacto">
+            <button className={arredondamento === "litro" ? "selected" : ""} onClick={() => setArredondamento("litro")}>L</button>
+            <button className={arredondamento === "galao" ? "selected" : ""} onClick={() => setArredondamento("galao")}>Galão 5 L</button>
+          </div>
+          <button className="iconAcao" onClick={carregar} disabled={carregando} title="Atualizar saldo">
+            {carregando ? "…" : "⟳"}
+          </button>
+          <span className="calcResumo">{resumo.litros} L</span>
+        </div>
+      ) : (
+        <div className="calcControles avulsoControles">
+          <div className="chipGrid">
+            {preBatches().map((coquetel) => (
+              <button
+                key={coquetel.id}
+                type="button"
+                className={avulsoId === coquetel.id ? "selected" : ""}
+                onClick={() => setAvulsoId(coquetel.id)}
+              >
+                {coquetel.nome}
+              </button>
+            ))}
+          </div>
+          <label className="calcLitros">
+            <input
+              type="number"
+              min="0"
+              step="0.5"
+              inputMode="decimal"
+              value={avulsoLitros}
+              onChange={(event) => setAvulsoLitros(numberValue(event.target.value))}
+            />
+            <span>litros</span>
+          </label>
+        </div>
+      )}
 
-      <BlocoCascata titulo="Produzir — xaropes e extratos" vazio="Nenhuma produção necessária.">
-        {producoes.map((lote) => (
-          <article className="historyCard" key={lote.chave}>
-            <div>
-              <h3>{lote.nome}</h3>
-              <p>
-                Necessário {emLitros(lote.necessario)} L · saldo {emLitros(lote.saldo)} L
-                {" · validade "}{validadeDias(lote.chave)} dias
-              </p>
-            </div>
-            <strong className="stockQty">{emLitros(lote.produzir)} L</strong>
-          </article>
-        ))}
-      </BlocoCascata>
+      {erro && <p className="warning">{erro}</p>}
 
-      <BlocoCascata titulo="Subir do estoque" vazio="Nada a subir.">
-        {resultado.separacao.map((linha) => (
-          <article className="historyCard" key={linha.chave}>
-            <div>
-              <h3>{linha.nome}</h3>
-              <p>{quantidadeLegivel(linha.qtdReceita, linha.unidadeReceita)} na receita</p>
-            </div>
-            <strong className="stockQty">{linha.unidades} {linha.unidadeEstoque}</strong>
-          </article>
-        ))}
-      </BlocoCascata>
+      <BlocoDobravel
+        icone="🥃"
+        titulo={ehSugestao ? "Produzir" : "No galão"}
+        itens={preBatchItens}
+        aberto={Boolean(abertos.prebatch)}
+        onToggle={() => alternar("prebatch")}
+        render={(item) => (ehSugestao
+          ? <LinhaCalc key={item.chave} nome={item.nome} valor={`${emLitros(item.produzir)} L`} detalhe={`par ${emLitros(item.par)}`} />
+          : <LinhaCalc key={item.chave} nome={item.nome} valor={quantidadeLegivel(item.ml, "ml")} />
+        )}
+      />
 
-      <BlocoCascata titulo="Insumos base" vazio="Nenhum insumo base.">
-        {resultado.insumosBase.map((linha) => (
-          <article className="historyCard" key={linha.chave}>
-            <div>
-              <h3>{linha.nome}</h3>
-              <p>
-                {quantidadeLegivel(linha.qtdReceita, linha.unidadeReceita)}
-                {linha.embalagemFechada ? " · embalagem fechada" : " · a granel"}
-              </p>
-            </div>
-            <strong className="stockQty">{linha.unidades} {linha.unidadeEstoque}</strong>
-          </article>
-        ))}
-      </BlocoCascata>
+      <BlocoDobravel
+        icone="🧪"
+        titulo="Produções"
+        itens={producoes}
+        aberto={Boolean(abertos.producoes)}
+        onToggle={() => alternar("producoes")}
+        render={(item) => (
+          <LinhaCalc key={item.chave} nome={item.nome} valor={`${emLitros(item.produzir)} L`} detalhe={`${validadeDias(item.chave)}d`} />
+        )}
+      />
+
+      <BlocoDobravel
+        icone="🍾"
+        titulo="Do estoque"
+        itens={separacao}
+        aberto={Boolean(abertos.estoque)}
+        onToggle={() => alternar("estoque")}
+        render={(item) => (
+          <LinhaCalc
+            key={item.chave}
+            nome={item.nome}
+            valor={`${item.unidades} ${item.unidadeEstoque}`}
+            detalhe={quantidadeLegivel(item.qtdReceita, item.unidadeReceita)}
+          />
+        )}
+      />
+
+      <BlocoDobravel
+        icone="🧂"
+        titulo="Insumos"
+        itens={insumos}
+        aberto={Boolean(abertos.insumos)}
+        onToggle={() => alternar("insumos")}
+        render={(item) => (
+          <LinhaCalc
+            key={item.chave}
+            nome={item.nome}
+            valor={quantidadeLegivel(item.qtdReceita, item.unidadeReceita)}
+            detalhe={item.embalagemFechada ? `${item.unidades} ${item.unidadeEstoque}` : ""}
+          />
+        )}
+      />
     </main>
   );
 }
 
-function BlocoCascata({ titulo, vazio, children }) {
-  const itens = React.Children.toArray(children);
+// Requisição em duas pernas (Fase 3):
+//
+//   quem precisa monta o pedido      → PENDENTE, nada sai do estoque
+//   o estoquista separa e manda      → baixa em MOVIMENTOS
+//
+// O estoquista pode reduzir a quantidade ou recusar por falta, nunca aumentar.
+// A divergência entre pedido e separado fica registrada, não sobrescrita.
+function RequisicoesScreen({ products, user, onNotify }) {
+  const [aba, setAba] = useState("abertas");
+  const [requisicoes, setRequisicoes] = useState([]);
+  const [carregando, setCarregando] = useState(false);
+  const [erro, setErro] = useState("");
+  const [separando, setSeparando] = useState(null);
+
+  const podeSeparar = ehAdmin(user) || podeUsuario(user, "separar");
+  const nomePorId = useMemo(() => new Map(products.map((p) => [p.id, p.nome])), [products]);
+  const nomeDe = (id) => nomePorId.get(id) || id;
+
+  async function carregar() {
+    setCarregando(true);
+    setErro("");
+    try {
+      setRequisicoes(await listarRequisicoes());
+    } catch (error) {
+      setErro(error.message || "Falha ao consultar requisições.");
+    } finally {
+      setCarregando(false);
+    }
+  }
+
+  useEffect(() => { carregar(); }, []);
+
+  const abertas = requisicoes.filter((r) => r.status === "PENDENTE");
+  const fechadas = requisicoes.filter((r) => r.status !== "PENDENTE");
+
+  if (separando) {
+    return (
+      <SepararRequisicao
+        requisicao={separando}
+        nomeDe={nomeDe}
+        products={products}
+        user={user}
+        onCancelar={() => setSeparando(null)}
+        onPronto={async (mensagem) => {
+          setSeparando(null);
+          onNotify(mensagem);
+          await carregar();
+        }}
+      />
+    );
+  }
+
   return (
-    <section>
-      <p className="label">{titulo}</p>
-      {itens.length ? <div className="list">{itens}</div> : <p className="miniText">{vazio}</p>}
+    <main className="screen calcScreen">
+      <div className="calcTopo">
+        <h1>Requisições</h1>
+        <button className="iconAcao" onClick={carregar} disabled={carregando} title="Atualizar">
+          {carregando ? "…" : "⟳"}
+        </button>
+      </div>
+
+      <div className="quickFilters compacto">
+        <button className={aba === "abertas" ? "selected" : ""} onClick={() => setAba("abertas")}>
+          Em aberto {abertas.length ? `(${abertas.length})` : ""}
+        </button>
+        <button className={aba === "nova" ? "selected" : ""} onClick={() => setAba("nova")}>Nova</button>
+        <button className={aba === "historico" ? "selected" : ""} onClick={() => setAba("historico")}>Histórico</button>
+      </div>
+
+      {erro && <p className="warning">{erro}</p>}
+
+      {aba === "nova" && (
+        <NovaRequisicao
+          products={products}
+          user={user}
+          onPronto={async (mensagem) => {
+            onNotify(mensagem);
+            setAba("abertas");
+            await carregar();
+          }}
+        />
+      )}
+
+      {aba === "abertas" && (
+        <>
+          {!abertas.length && !carregando && <EmptyState title="Nada em aberto" text="As requisições pendentes aparecem aqui." />}
+          {abertas.map((req) => (
+            <CardRequisicao
+              key={req.reqId}
+              req={req}
+              nomeDe={nomeDe}
+              acao={podeSeparar ? { rotulo: "Separar", onClick: () => setSeparando(req) } : null}
+            />
+          ))}
+          {!podeSeparar && abertas.length > 0 && (
+            <p className="miniText">Seu perfil não separa requisições — só o estoquista e o admin.</p>
+          )}
+        </>
+      )}
+
+      {aba === "historico" && (
+        <>
+          {!fechadas.length && <EmptyState title="Nenhuma requisição fechada" text="O que já foi separado aparece aqui." />}
+          {fechadas.map((req) => <CardRequisicao key={req.reqId} req={req} nomeDe={nomeDe} />)}
+        </>
+      )}
+    </main>
+  );
+}
+
+const ICONE_STATUS = { PENDENTE: "⏳", SEPARADO: "✅", PARCIAL: "◐", RECUSADO: "✕" };
+
+function CardRequisicao({ req, nomeDe, acao }) {
+  const [aberto, setAberto] = useState(false);
+  return (
+    <section className={`bloco ${aberto ? "aberto" : ""}`}>
+      <button type="button" className="blocoHead" onClick={() => setAberto(!aberto)}>
+        <span className="blocoIcone" aria-hidden="true">{ICONE_STATUS[req.status] || "•"}</span>
+        <strong>{req.destino}</strong>
+        <span className="blocoContador">{req.itens.length}</span>
+        <span className="blocoSeta" aria-hidden="true">{aberto ? "▾" : "▸"}</span>
+      </button>
+      {aberto && (
+        <div className="blocoLista">
+          {req.itens.map((item) => (
+            <p className="linhaCalc" key={item.produtoId}>
+              <span>{nomeDe(item.produtoId)}</span>
+              {item.qtdSeparada !== null && item.qtdSeparada !== item.qtdPedida && (
+                <em>pedido {item.qtdPedida}</em>
+              )}
+              <strong>{item.qtdSeparada === null ? item.qtdPedida : item.qtdSeparada}</strong>
+            </p>
+          ))}
+          <p className="miniText">{formatDate(req.data)} · {req.status}</p>
+          {acao && (
+            <div className="bottomActions inline">
+              <Button onClick={acao.onClick}>{acao.rotulo}</Button>
+            </div>
+          )}
+        </div>
+      )}
     </section>
+  );
+}
+
+/**
+ * Monta o pedido percorrendo o catálogo por categoria, com campo de
+ * quantidade em cada linha. A busca filtra essa mesma lista, então dá para
+ * pedir um item avulso ou montar a lista inteira sem trocar de modo.
+ *
+ * As quantidades ficam guardadas como TEXTO, não como número. Convertendo na
+ * hora da digitação, apagar o campo virava zero e a linha sumia do pedido no
+ * meio da edição.
+ */
+function NovaRequisicao({ products, user, onPronto }) {
+  const [destino, setDestino] = useState("BAR22");
+  const [busca, setBusca] = useState("");
+  const [qtds, setQtds] = useState({});
+  const [abertas, setAbertas] = useState({});
+  const [erro, setErro] = useState("");
+  const [enviando, setEnviando] = useState(false);
+
+  // Filtro sem acento: ninguém digita "tônica" no celular atrás do bar.
+  const query = normalizeMatchName(busca);
+  // Só bebida entra em requisição; insumo de produção a produção puxa direto.
+  const disponiveis = products.filter((p) => p.ativo && p.requisitavel !== false);
+  const visiveis = query
+    ? disponiveis.filter((p) => normalizeMatchName(p.nome).includes(query))
+    : disponiveis;
+
+  const categorias = CATEGORIES
+    .map((categoria) => ({ categoria, itens: visiveis.filter((p) => getOperationalCategory(p) === categoria) }))
+    .filter((grupo) => grupo.itens.length);
+
+  const pedido = Object.keys(qtds)
+    .map((id) => ({ id, qtd: numberValue(qtds[id]) }))
+    .filter((item) => item.qtd > 0);
+
+  function mudar(id, texto) {
+    setQtds((atual) => ({ ...atual, [id]: texto }));
+  }
+
+  async function enviar() {
+    if (!pedido.length) {
+      setErro("Nenhum item com quantidade.");
+      return;
+    }
+    setErro("");
+    setEnviando(true);
+    try {
+      await criarRequisicao({
+        reqId: uid("req"),
+        destino,
+        solicitanteId: user?.id || "",
+        data: today(),
+        itens: pedido.map((item) => ({ produtoId: item.id, qtd: item.qtd })),
+      });
+      setQtds({});
+      setBusca("");
+      onPronto(`Requisição enviada para ${destino}: ${pedido.length} item(ns).`);
+    } catch (error) {
+      setErro(error.message || "Falha ao enviar a requisição.");
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  return (
+    <>
+      <section className="panel stack">
+        <Select label="Para qual local" value={destino} onChange={setDestino} options={CODIGOS_LOCAIS} />
+        <Input label="Filtrar" value={busca} onChange={setBusca} placeholder="Nome do produto" />
+      </section>
+
+      {/* Resumo colado no topo: o que já entrou no pedido, sem precisar rolar. */}
+      {pedido.length > 0 && (
+        <section className="bloco aberto pedidoResumo">
+          <div className="blocoHead estatico">
+            <span className="blocoIcone" aria-hidden="true">📋</span>
+            <strong>Pedido</strong>
+            <span className="blocoContador">{pedido.length}</span>
+          </div>
+          <div className="blocoLista">
+            {pedido.map((item) => (
+              <p className="linhaCalc" key={item.id}>
+                <span>{products.find((p) => p.id === item.id)?.nome || item.id}</span>
+                <strong>{item.qtd}</strong>
+                <button className="ghostButton compact" onClick={() => mudar(item.id, "")}>×</button>
+              </p>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {!categorias.length && <EmptyState title="Nada encontrado" text="Ajuste o filtro." />}
+
+      {categorias.map((grupo, indice) => {
+        // Com filtro ativo tudo abre; sem filtro, só a primeira categoria.
+        const aberta = query ? true : (abertas[grupo.categoria] ?? indice === 0);
+        return (
+          <section className={`bloco ${aberta ? "aberto" : ""}`} key={grupo.categoria}>
+            <button
+              type="button"
+              className="blocoHead"
+              onClick={() => setAbertas((a) => ({ ...a, [grupo.categoria]: !aberta }))}
+            >
+              <strong>{grupo.categoria}</strong>
+              <span className="blocoContador">{grupo.itens.length}</span>
+              <span className="blocoSeta" aria-hidden="true">{aberta ? "▾" : "▸"}</span>
+            </button>
+            {aberta && (
+              <div className="blocoLista">
+                {grupo.itens.map((produto) => (
+                  <div className="linhaCalc" key={produto.id}>
+                    <span>{produto.nome}</span>
+                    <em>{produto.unidade}</em>
+                    <input
+                      className="qtdInline"
+                      type="number"
+                      min="0"
+                      inputMode="decimal"
+                      placeholder="0"
+                      value={qtds[produto.id] ?? ""}
+                      onChange={(event) => mudar(produto.id, event.target.value)}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        );
+      })}
+
+      {erro && <p className="error">{erro}</p>}
+      <div className="bottomActions">
+        <Button onClick={enviar} disabled={enviando || !pedido.length}>
+          {enviando ? "Enviando..." : `Enviar${pedido.length ? ` (${pedido.length})` : ""}`}
+        </Button>
+      </div>
+    </>
+  );
+}
+
+// Tela do estoquista. Vem preenchida com o que foi pedido; ele reduz o que
+// faltar e zera o que não tem. Nunca dá para aumentar.
+//
+// As quantidades também ficam como texto aqui, pelo mesmo motivo: apagar para
+// redigitar não pode zerar o item nem embaralhar a tela.
+function SepararRequisicao({ requisicao, nomeDe, user, onCancelar, onPronto }) {
+  const [qtds, setQtds] = useState(
+    () => Object.fromEntries(requisicao.itens.map((item) => [item.produtoId, String(item.qtdPedida)]))
+  );
+  const [erro, setErro] = useState("");
+  const [enviando, setEnviando] = useState(false);
+
+  function mudar(produtoId, texto, pedida) {
+    // Campo vazio fica vazio enquanto edita; o teto é o que foi pedido.
+    if (texto === "") return setQtds((a) => ({ ...a, [produtoId]: "" }));
+    const numero = Math.max(0, Math.min(pedida, numberValue(texto)));
+    setQtds((a) => ({ ...a, [produtoId]: String(numero) }));
+  }
+
+  const separados = requisicao.itens.filter((item) => numberValue(qtds[item.produtoId]) > 0).length;
+
+  async function enviar() {
+    setErro("");
+    setEnviando(true);
+    try {
+      const resultado = await separarRequisicao({
+        reqId: requisicao.reqId,
+        separadorId: user?.id || "",
+        itens: requisicao.itens.map((item) => ({
+          produtoId: item.produtoId,
+          qtdSeparada: numberValue(qtds[item.produtoId]),
+        })),
+      });
+      onPronto(`Separado para ${requisicao.destino}: ${resultado.movimentosGravados} item(ns) baixados. Status ${resultado.status}.`);
+    } catch (error) {
+      setErro(error.message || "Falha ao separar. Nada foi baixado.");
+      setEnviando(false);
+    }
+  }
+
+  return (
+    <main className="screen calcScreen">
+      <div className="calcTopo">
+        <h1>Separar</h1>
+        <button className="iconAcao" onClick={onCancelar} title="Voltar">←</button>
+      </div>
+      <p className="miniText">
+        Para <strong>{requisicao.destino}</strong> · {formatDate(requisicao.data)}. Reduza o que faltar
+        e zere o que não tiver. Ao mandar, o estoque baixa.
+      </p>
+
+      <section className="panel stack">
+        {requisicao.itens.map((item) => (
+          <div className="linhaCalc" key={item.produtoId}>
+            <span>{nomeDe(item.produtoId)}</span>
+            <em>pediu {item.qtdPedida}</em>
+            <input
+              className="qtdInline"
+              type="number"
+              min="0"
+              max={item.qtdPedida}
+              inputMode="decimal"
+              placeholder="0"
+              value={qtds[item.produtoId] ?? ""}
+              onChange={(event) => mudar(item.produtoId, event.target.value, item.qtdPedida)}
+            />
+          </div>
+        ))}
+        {erro && <p className="error">{erro}</p>}
+        <div className="bottomActions inline">
+          <button className="ghostButton" onClick={onCancelar}>Cancelar</button>
+          <Button onClick={enviar} disabled={enviando}>
+            {enviando ? "Baixando..." : `Mandar e baixar (${separados})`}
+          </Button>
+        </div>
+      </section>
+    </main>
   );
 }
 

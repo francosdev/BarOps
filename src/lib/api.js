@@ -130,6 +130,28 @@ export async function gravarMovimentos(movimentos) {
   return resultado;
 }
 
+// --- Requisição (Fase 3) ---------------------------------------------------
+
+// Quem precisa monta o pedido. Nada sai do estoque aqui.
+export async function criarRequisicao({ reqId, destino, solicitanteId, data, itens }) {
+  const resultado = await chamarAppsScript({ action: "requisicoes.criar", reqId, destino, solicitanteId, data, itens });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado;
+}
+
+export async function listarRequisicoes(filtros = {}) {
+  const resultado = await chamarAppsScript({ action: "requisicoes.listar", ...filtros });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado.requisicoes || [];
+}
+
+// O estoquista separa e manda. É aqui que o estoque baixa.
+export async function separarRequisicao({ reqId, separadorId, itens }) {
+  const resultado = await chamarAppsScript({ action: "requisicoes.separar", reqId, separadorId, itens });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado;
+}
+
 // Saldo de qualquer produto em qualquer local = soma dos movimentos daquele
 // produto naquele local. Nenhum módulo tem estoque próprio.
 export async function consultarSaldos(filtros = {}) {

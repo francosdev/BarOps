@@ -53,10 +53,24 @@ export function explodirCascata({ saldos = {}, arredondamento = "litro" } = {}) 
   // 3. Prateleira de serviço entra como demanda adicional, não como desconto.
   Object.entries(PAR_SERVICO).forEach(([chave, ml]) => acrescentar(chave, ml));
 
-  // 4. Produções na ordem de dependência. Só se consome insumo do que de fato
-  //    se vai produzir, por isso a explosão usa `produzir`, não `necessario`.
+  // 4 e 5: resolver produções e converter para unidade de estoque.
+  const { lotesProducao, separacao, insumosBase } = resolverEConverter(demanda, acrescentar, saldoDe);
+
+  return { preBatches: lotesPreBatch, producoes: lotesProducao, separacao, insumosBase };
+}
+
+/**
+ * Miolo compartilhado entre a sugestão automática e o cálculo avulso:
+ * resolve as produções na ordem de dependência e converte tudo para unidade
+ * de estoque.
+ *
+ * Só se consome insumo do que de fato se vai produzir, por isso a explosão
+ * usa `produzir`, não `necessario`.
+ */
+function resolverEConverter(demanda, acrescentar, saldoDe) {
   const insumosBase = {};
   const lotesProducao = [];
+
   ordemDeProducao().forEach((chave) => {
     const necessario = demanda[chave] || 0;
     const saldo = saldoDe(chave);
@@ -74,8 +88,7 @@ export function explodirCascata({ saldos = {}, arredondamento = "litro" } = {}) 
     });
   });
 
-  // 5. Destilados e demais insumos convertidos para unidade de estoque.
-  //    Embalagem fechada sobe para a unidade inteira; granel sai no exato.
+  // Embalagem fechada sobe para a unidade inteira; granel sai no exato.
   const separacao = Object.entries(demanda)
     .filter(([chave]) => !producaoPorId(chave) && insumoPorChave(chave))
     .map(([chave, qtd]) => montarLinha(chave, qtd))
@@ -87,7 +100,38 @@ export function explodirCascata({ saldos = {}, arredondamento = "litro" } = {}) 
     .filter(Boolean)
     .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
 
-  return { preBatches: lotesPreBatch, producoes: lotesProducao, separacao, insumosBase: base };
+  return { lotesProducao, separacao, insumosBase: base };
+}
+
+/**
+ * Cálculo avulso: "quero fazer N litros deste pré-batch, o que preciso?".
+ *
+ * Não olha saldo nem par — é conta de receita pura, para quem já decidiu o
+ * volume. Devolve o que vai no batch, as produções que isso exige se forem
+ * feitas do zero, e os insumos base correspondentes.
+ */
+export function explodirAvulso({ coquetelId, litros }) {
+  const coquetel = coquetelPorId(coquetelId);
+  const ml = Math.max(0, Number(litros) || 0) * 1000;
+  if (!coquetel || !ml) {
+    return { coquetel, ml: 0, componentes: [], producoes: [], separacao: [], insumosBase: [] };
+  }
+
+  const demanda = {};
+  const acrescentar = (chave, quantidade) => { demanda[chave] = (demanda[chave] || 0) + quantidade; };
+  const total = totalDoBatch(coquetelId);
+
+  // O que entra no galão, rateado pelo total da dose.
+  const componentes = coquetel.batch.map((linha) => {
+    const quantidade = ml * linha.ml / total;
+    acrescentar(linha.insumo, quantidade);
+    return { chave: linha.insumo, nome: nomeDaReferencia(linha.insumo), ml: arredonda2(quantidade) };
+  });
+
+  // Sem saldo: quem pede avulso quer a conta do zero.
+  const { lotesProducao, separacao, insumosBase } = resolverEConverter(demanda, acrescentar, () => 0);
+
+  return { coquetel, ml, componentes, producoes: lotesProducao, separacao, insumosBase };
 }
 
 function montarLinha(chave, qtdReceita) {

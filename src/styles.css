@@ -426,6 +426,198 @@ h3 {
   box-shadow: inset 4px 0 0 rgba(200, 138, 45, 0.9);
 }
 
+/* --- Calculadora de pré-batch: pouca informação, tudo recolhível -------- */
+
+.calcTopo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.calcTopo h1 {
+  margin: 0;
+}
+
+.calcModos {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.calcModos button {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 42px;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #d4d4d4;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.calcModos button span {
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.calcModos button.selected {
+  border-color: var(--brand-red);
+  background: var(--brand-red);
+  color: #fff;
+}
+
+.calcControles {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.9rem 0;
+}
+
+.quickFilters.compacto {
+  margin: 0;
+  flex: 1;
+}
+
+.iconAcao {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--brand-amber, #c88a2d);
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+.calcResumo {
+  flex: none;
+  color: var(--brand-amber, #c88a2d);
+  font-size: 1.05rem;
+  font-weight: 800;
+}
+
+.avulsoControles {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.calcLitros {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.calcLitros input {
+  flex: 1;
+  min-height: 52px;
+  padding: 0 0.9rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 1.4rem;
+  font-weight: 800;
+}
+
+.calcLitros span {
+  color: #a1a1a1;
+  font-size: 0.9rem;
+}
+
+.bloco {
+  margin-bottom: 0.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  overflow: hidden;
+}
+
+.bloco.aberto {
+  border-color: rgba(200, 138, 45, 0.5);
+}
+
+/* Alvo grande: dedo, não mouse. */
+.blocoHead {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  min-height: 56px;
+  padding: 0 1rem;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.blocoIcone {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.blocoHead strong {
+  flex: 1;
+  text-align: left;
+  font-size: 0.98rem;
+}
+
+.blocoContador {
+  min-width: 26px;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #d4d4d4;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.blocoSeta {
+  color: var(--brand-amber, #c88a2d);
+  font-size: 0.9rem;
+}
+
+.blocoLista {
+  padding: 0 1rem 0.7rem;
+}
+
+.linhaCalc {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.5rem 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 0.95rem;
+}
+
+.linhaCalc span {
+  flex: 1;
+}
+
+.linhaCalc em {
+  color: #808080;
+  font-size: 0.78rem;
+  font-style: normal;
+}
+
+.linhaCalc strong {
+  white-space: nowrap;
+  font-size: 1.05rem;
+  font-weight: 800;
+}
+
+.blocoVazio {
+  margin: 0;
+  padding: 0 1rem 0.9rem;
+  color: #808080;
+  font-size: 0.85rem;
+}
+
 /* --- Fichas técnicas: leitura em tablet durante o serviço --------------- */
 
 .fichaList {
@@ -1034,4 +1226,27 @@ mark,
 .stockQty {
   white-space: nowrap;
   font-size: 1.05rem;
+}
+
+/* Campo de quantidade inline, usado na requisição e na separação. */
+.qtdInline {
+  width: 78px;
+  min-height: 44px;
+  padding: 0 0.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 1.05rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+/* Cabeçalho de bloco sem ação de recolher (resumo do pedido). */
+.blocoHead.estatico {
+  cursor: default;
+}
+
+.pedidoResumo {
+  border-color: rgba(200, 138, 45, 0.55);
 }
