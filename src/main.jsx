@@ -987,6 +987,12 @@ function apenasAlfanumerico(value) {
   return normalizeMatchName(value).replace(/[^a-z0-9]/g, "");
 }
 
+// "Copo alto (long drink)" -> "copo alto". Só o parêntese do FIM: ele é
+// descrição, não identidade.
+function semParenteseFinal(value) {
+  return normalizeMatchName(value).replace(/\s*\([^)]*\)\s*$/, "").trim();
+}
+
 /**
  * Casa o produto do app com a linha da planilha. Exige nome igual — igual de
  * verdade, tolerando só acento, espaço e pontuação.
@@ -998,14 +1004,25 @@ function apenasAlfanumerico(value) {
  * bebida recebendo contagem de taça. Nome que não bate agora volta como não
  * encontrado, e a tela lista para a pessoa corrigir na planilha.
  */
-function matchSheetQuantity(sheetItems, productName) {
+function matchSheetQuantity(sheetItems, productName, basesAmbiguas) {
   const target = normalizeMatchName(productName);
   const exact = sheetItems.find((item) => item.norm === target);
   if (exact) return exact.quantidade;
+
   const alvo = apenasAlfanumerico(productName);
   const iguais = sheetItems.filter((item) => item.alfa && item.alfa === alvo);
   // Empate é ambiguidade: duas linhas com o mesmo nome não decidem nada.
-  return iguais.length === 1 ? iguais[0].quantidade : undefined;
+  if (iguais.length === 1) return iguais[0].quantidade;
+
+  // Terceiro e último nível: o parêntese final. O catálogo escreve
+  // "Copo alto (long drink)" e a planilha escreve "Copo alto" — mesma coisa,
+  // e são 10 dos itens de copo e taça. Só vale quando sobra exatamente um
+  // candidato dos dois lados: se dois produtos do app encolhem para a mesma
+  // base, os dois ficam sem casar em vez de disputarem a mesma linha.
+  const base = semParenteseFinal(productName);
+  if (!base || basesAmbiguas?.has(base)) return undefined;
+  const porBase = sheetItems.filter((item) => item.base && item.base === base);
+  return porBase.length === 1 ? porBase[0].quantidade : undefined;
 }
 
 function buildCountReportRows(inventory, products) {
@@ -1119,26 +1136,56 @@ function App() {
     setScreen("login");
   }
 
-  // A referência do estoque é a aba ESTOQUE GERAL na coluna do fechamento de
-  // domingo. A coluna vem da configuração porque o cabeçalho varia; sem ela
-  // escolhida, cai na que o script sugere.
+  // Categorias que a casa PRODUZ. Nunca aparecem na aba de compra, e marcá-las
+  // como "sem linha na planilha" seria acusar de erro o que está certo — o
+  // saldo delas mora em MOVIMENTOS.
+  const CATEGORIAS_PRODUZIDAS = ["Produção", "Pré-batch"];
+
+  /**
+   * Escolhe a coluna quando ninguém escolheu ainda.
+   *
+   * O `colunaPadrao` que o script sugere procura o cabeçalho exato "Fecha" e,
+   * não achando, cai na coluna 3. Na ESTOQUE GERAL real isso caía em
+   * "COMPRAR" — uma coluna de quanto falta comprar, negativa em 26 das 63
+   * linhas. Era ela que estava aparecendo como estoque.
+   *
+   * Aqui a busca é por cabeçalho que CONTENHA "fecha", preferindo o que
+   * também diga "domingo", que é a referência que Carlos definiu.
+   */
+  function colunaDeFechamento(grade) {
+    const cabecalhos = grade.cabecalhos || [];
+    const casa = (regex) => cabecalhos.find((cabecalho) => regex.test(normalizeMatchName(cabecalho.nome)));
+    const escolhida = casa(/fecha.*domingo|domingo.*fecha/) || casa(/fecha/);
+    return escolhida ? escolhida.indice : null;
+  }
+
   async function syncStockFromSheet(sheetName, coluna) {
     const grade = await fetchSheetStock(sheetName);
-    const indice = coluna ?? grade.colunaLegado ?? grade.colunaPadrao ?? 1;
+    const indice = coluna ?? grade.colunaLegado ?? colunaDeFechamento(grade) ?? grade.colunaPadrao ?? 1;
     const sheetItems = grade.linhas.map((linha) => ({
       norm: normalizeMatchName(linha.produto),
       alfa: apenasAlfanumerico(linha.produto),
+      base: semParenteseFinal(linha.produto),
       quantidade: numberValue(linha.valores[indice]),
       temValor: linha.valores[indice] !== null && linha.valores[indice] !== undefined,
     })).filter((item) => item.temValor);
+
+    // Dois produtos que encolhem para a mesma base não podem disputar a mesma
+    // linha da planilha; nesse caso o nível do parêntese não vale para nenhum.
+    const contagemPorBase = new Map();
+    products.filter((product) => product.ativo).forEach((product) => {
+      const base = semParenteseFinal(product.nome);
+      contagemPorBase.set(base, (contagemPorBase.get(base) || 0) + 1);
+    });
+    const basesAmbiguas = new Set([...contagemPorBase].filter(([, total]) => total > 1).map(([base]) => base));
 
     const naoEncontrados = [];
     let updated = 0;
     const next = products.map((product) => {
       if (!product.ativo) return product;
-      const quantidade = matchSheetQuantity(sheetItems, product.nome);
+      const quantidade = matchSheetQuantity(sheetItems, product.nome, basesAmbiguas);
       if (quantidade === undefined) {
-        naoEncontrados.push(product.nome);
+        if (!CATEGORIAS_PRODUZIDAS.includes(product.categoria)) naoEncontrados.push(product.nome);
         return product;
       }
       updated += 1;

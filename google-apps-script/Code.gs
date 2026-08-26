@@ -91,7 +91,7 @@ function doPost(e) {
     if (rota) return jsonResponse(rota(payload));
 
     // Leitura de estoque. Antes devolvia so uma coluna, escolhida aqui pelo
-    // cabecalho "Fecha" com fallback cego na coluna 3 — e a aba de referencia
+    // cabecalho "Fecha" com fallback cego na coluna 3, e a aba de referencia
     // (ESTOQUE GERAL) tem varias colunas de fechamento, uma por dia. Adivinhar
     // qual era dava numero errado sem avisar ninguem.
     //
