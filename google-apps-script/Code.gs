@@ -28,6 +28,13 @@ const CABECALHOS = {
   // Uma linha por item. A chave e (req_id, produto_id): a mesma requisicao
   // nao pede o mesmo produto duas vezes.
   REQUISICOES: ["req_id", "data", "solicitante_id", "destino", "produto_id", "qtd_pedida", "qtd_separada", "status", "separador_id", "timestamp_separacao", "recebedor_id", "timestamp_recebimento", "obs"],
+
+  // Fase 5 — checklists operacionais.
+  CHK_TEMPLATES: ["template_id", "nome", "local", "responsavel", "momento", "dias_semana", "ativo", "criado_em"],
+  CHK_ITENS: ["item_id", "template_id", "ordem", "descricao", "tipo_evidencia", "referencia", "obrigatorio", "ativo"],
+  CHK_EXECUCOES: ["execucao_id", "template_id", "data", "local", "usuario", "status", "iniciado_em", "concluido_em"],
+  CHK_RESPOSTAS: ["resposta_id", "execucao_id", "item_id", "valor", "usuario", "registrado_em"],
+  MURAL: ["aviso_id", "criado_em", "autor", "texto", "para", "status", "resolvido_por", "resolvido_em"],
 };
 
 // Fluxo de duas pernas: quem precisa pede, o estoquista separa e manda. A
@@ -289,6 +296,20 @@ const ROTAS = {
   "requisicoes.listar": rotaRequisicoesListar,
   "requisicoes.separar": rotaRequisicoesSeparar,
   "requisicoes.cancelar": rotaRequisicoesCancelar,
+
+  // Fase 5.
+  "chk_bootstrap": rotaChkBootstrap,
+  "chk_listar_meus": rotaChkListarMeus,
+  "chk_detalhe": rotaChkDetalhe,
+  "chk_abrir_execucao": rotaChkAbrirExecucao,
+  "chk_responder_item": rotaChkResponderItem,
+  "chk_concluir": rotaChkConcluir,
+  "chk_painel": rotaChkPainel,
+  "chk_relatorio": rotaChkRelatorio,
+  "chk_crud_template": rotaChkCrudTemplate,
+  "mural_listar": rotaMuralListar,
+  "mural_criar": rotaMuralCriar,
+  "mural_resolver": rotaMuralResolver,
 };
 
 // Cria as tres abas e, se PRODUTOS/USUARIOS estiverem vazias, semeia com o
@@ -1170,4 +1191,839 @@ function jsonResponse(payload) {
   return ContentService
     .createTextOutput(JSON.stringify(payload))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ===========================================================================
+// FASE 5 — CHECKLISTS OPERACIONAIS
+//
+// Checklist recorrente por turno, atribuido por territorio. Este modulo NAO
+// escreve em MOVIMENTOS: le apenas para validar evidencia do tipo CONTAGEM.
+//
+// Duas regras mandam em tudo aqui:
+//
+//   1. Timestamp e sempre do servidor. Relogio de celular nao entra.
+//   2. Toda escrita e upsert por chave. O historico de inventario tem
+//      contagens duplicadas e triplicadas pelo mesmo inventoryId (12/07,
+//      Bar 22, Agua 510ml gravada 1802 -> 1804 -> 1806 em tres POSTs do
+//      mesmo id). Aqui reenviar sobrescreve, nunca acrescenta.
+// ===========================================================================
+
+const ABA_CHK_TEMPLATES = "CHK_TEMPLATES";
+const ABA_CHK_ITENS = "CHK_ITENS";
+const ABA_CHK_EXECUCOES = "CHK_EXECUCOES";
+const ABA_CHK_RESPOSTAS = "CHK_RESPOSTAS";
+const ABA_MURAL = "MURAL";
+
+const MOMENTOS_CHK = ["ABERTURA", "PRE_OPERACAO", "FECHAMENTO"];
+const TIPOS_EVIDENCIA = ["TOGGLE", "NUMERO", "TEXTO", "CONTAGEM"];
+const STATUS_EXECUCAO = ["ABERTA", "CONCLUIDA", "EXPIRADA"];
+
+// Locais do checklist. Sao os mesmos codigos de MOVIMENTOS, para a validacao
+// de CONTAGEM poder cruzar direto sem tabela de-para.
+const LOCAIS_CHK = ["BAR22", "BAR23", "CHIVAS", "GERAL", "PRODUCAO"];
+
+// Execucao ABERTA vira EXPIRADA depois disto, contado da data operacional.
+const HORAS_ATE_EXPIRAR = 24;
+
+/**
+ * Le uma aba e devolve tambem a linha da planilha de cada registro, que e o
+ * que permite fazer upsert sem reescrever a aba inteira.
+ */
+function lerAbaComLinha(ss, nome) {
+  const sheet = ss.getSheetByName(nome);
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  const cabecalho = CABECALHOS[nome];
+  const valores = sheet.getRange(2, 1, sheet.getLastRow() - 1, cabecalho.length).getValues();
+  const saida = [];
+  valores.forEach(function (linha, i) {
+    if (!String(linha[0] || "").trim()) return;
+    const objeto = { _row: i + 2 };
+    cabecalho.forEach(function (chave, c) { objeto[chave] = linha[c]; });
+    saida.push(objeto);
+  });
+  return saida;
+}
+
+/**
+ * Upsert: se `achar` encontrar uma linha, sobrescreve; senao, acrescenta.
+ * Devolve { row, criou }.
+ *
+ * E o coracao da idempotencia. Toda escrita deste modulo passa por aqui, e
+ * sempre dentro de um lock — duas pessoas respondendo o mesmo item ao mesmo
+ * tempo nao podem virar duas linhas.
+ */
+function upsertLinha(ss, nome, achar, valoresPorColuna) {
+  const sheet = garantirAba(ss, nome);
+  const cabecalho = CABECALHOS[nome];
+  const existentes = lerAbaComLinha(ss, nome);
+  const alvo = existentes.filter(achar)[0];
+  const linha = cabecalho.map(function (coluna) {
+    return valoresPorColuna[coluna] === undefined ? "" : valoresPorColuna[coluna];
+  });
+  if (alvo) {
+    sheet.getRange(alvo._row, 1, 1, cabecalho.length).setValues([linha]);
+    return { row: alvo._row, criou: false };
+  }
+  const row = sheet.getLastRow() + 1;
+  sheet.getRange(row, 1, 1, cabecalho.length).setValues([linha]);
+  return { row: row, criou: true };
+}
+
+function agoraISO() {
+  return new Date().toISOString();
+}
+
+function textoDe(valor) {
+  return String(valor === undefined || valor === null ? "" : valor).trim();
+}
+
+function ehVerdadeiro(valor) {
+  const texto = textoDe(valor).toLowerCase();
+  return texto === "true" || texto === "sim" || texto === "1" || valor === true;
+}
+
+/** Data operacional em YYYY-MM-DD, aceitando Date ou string da planilha. */
+function dataISO(valor) {
+  if (valor instanceof Date) {
+    return Utilities.formatDate(valor, "America/Sao_Paulo", "yyyy-MM-dd");
+  }
+  return textoDe(valor).slice(0, 10);
+}
+
+/** 1 = segunda ... 7 = domingo, como o campo dias_semana do template. */
+function diaDaSemanaOperacional(dataTexto) {
+  const partes = String(dataTexto).split("-");
+  const data = new Date(Number(partes[0]), Number(partes[1]) - 1, Number(partes[2]));
+  const dom0 = data.getDay();
+  return dom0 === 0 ? 7 : dom0;
+}
+
+/** Template vale hoje? Lista vazia de dias significa todos os dias. */
+function templateDevidoNaData(template, dataTexto) {
+  if (!ehVerdadeiro(template.ativo)) return false;
+  const dias = textoDe(template.dias_semana);
+  if (!dias) return true;
+  const hoje = String(diaDaSemanaOperacional(dataTexto));
+  return dias.split(",").map(function (d) { return d.trim(); }).indexOf(hoje) >= 0;
+}
+
+/**
+ * Quem esta chamando e admin? Vale o que esta na aba USUARIOS, nunca o que o
+ * cliente afirma — o token viaja no bundle e qualquer um pode forjar payload.
+ *
+ * Usuario que so existe no acesso de reserva do aparelho nao e admin aqui.
+ */
+function ehAdminChk(ss, usuario) {
+  const login = textoDe(usuario).toLowerCase();
+  if (!login) return false;
+  const achado = lerAba(ss, ABA_USUARIOS).filter(function (u) {
+    return textoDe(u.login).toLowerCase() === login && ehVerdadeiro(u.ativo);
+  })[0];
+  if (!achado) return false;
+  return textoDe(achado.perfil).toLowerCase().indexOf("admin") >= 0;
+}
+
+function exigirAdminChk(ss, usuario) {
+  if (!ehAdminChk(ss, usuario)) {
+    return { ok: false, error: "Acesso negado: esta tela e do administrador." };
+  }
+  return null;
+}
+
+/** O template e desta pessoa? Admin passa por cima. */
+function podeExecutarTemplate(ss, template, usuario) {
+  const login = textoDe(usuario).toLowerCase();
+  if (textoDe(template.responsavel).toLowerCase() === login) return true;
+  return ehAdminChk(ss, usuario);
+}
+
+// --- Leitura ---------------------------------------------------------------
+
+/**
+ * Os checklists devidos por esta pessoa nesta data, com o estado de cada um.
+ * Nao cria execucao: so olhar a lista nao pode abrir nada.
+ */
+function rotaChkListarMeus(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const usuario = textoDe(payload.usuario).toLowerCase();
+  const data = dataISO(payload.data) || dataISO(new Date());
+  if (!usuario) return { ok: false, error: "Informe o usuario." };
+
+  const admin = ehAdminChk(ss, usuario);
+  const templates = lerAba(ss, ABA_CHK_TEMPLATES).filter(function (t) {
+    const meu = textoDe(t.responsavel).toLowerCase() === usuario;
+    return (admin || meu) && templateDevidoNaData(t, data);
+  });
+
+  const itens = lerAba(ss, ABA_CHK_ITENS).filter(function (i) { return ehVerdadeiro(i.ativo); });
+  const execucoes = lerAba(ss, ABA_CHK_EXECUCOES).filter(function (e) { return dataISO(e.data) === data; });
+  const respostas = lerAba(ss, ABA_CHK_RESPOSTAS);
+
+  const lista = templates.map(function (template) {
+    const doTemplate = itens.filter(function (i) { return textoDe(i.template_id) === textoDe(template.template_id); });
+    const execucao = execucoes.filter(function (e) {
+      return textoDe(e.template_id) === textoDe(template.template_id) &&
+        textoDe(e.usuario).toLowerCase() === textoDe(template.responsavel).toLowerCase();
+    })[0];
+    const respondidos = execucao
+      ? respostas.filter(function (r) { return textoDe(r.execucao_id) === textoDe(execucao.execucao_id); }).length
+      : 0;
+    return {
+      templateId: textoDe(template.template_id),
+      nome: textoDe(template.nome),
+      local: textoDe(template.local),
+      momento: textoDe(template.momento),
+      responsavel: textoDe(template.responsavel),
+      totalItens: doTemplate.length,
+      obrigatorios: doTemplate.filter(function (i) { return ehVerdadeiro(i.obrigatorio); }).length,
+      respondidos: respondidos,
+      execucaoId: execucao ? textoDe(execucao.execucao_id) : "",
+      status: execucao ? textoDe(execucao.status) : "NAO_INICIADA",
+    };
+  });
+
+  return { ok: true, data: data, admin: admin, checklists: lista };
+}
+
+/** Itens de um template, na ordem, com as respostas ja dadas na execucao. */
+function rotaChkDetalhe(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const templateId = textoDe(payload.template_id);
+  const execucaoId = textoDe(payload.execucao_id);
+  if (!templateId) return { ok: false, error: "Informe o template." };
+
+  const itens = lerAba(ss, ABA_CHK_ITENS)
+    .filter(function (i) { return textoDe(i.template_id) === templateId && ehVerdadeiro(i.ativo); })
+    .sort(function (a, b) { return (Number(a.ordem) || 0) - (Number(b.ordem) || 0); });
+
+  const respostas = execucaoId
+    ? lerAba(ss, ABA_CHK_RESPOSTAS).filter(function (r) { return textoDe(r.execucao_id) === execucaoId; })
+    : [];
+  const porItem = {};
+  respostas.forEach(function (r) { porItem[textoDe(r.item_id)] = r; });
+
+  const execucao = execucaoId
+    ? lerAba(ss, ABA_CHK_EXECUCOES).filter(function (e) { return textoDe(e.execucao_id) === execucaoId; })[0]
+    : null;
+
+  return {
+    ok: true,
+    status: execucao ? textoDe(execucao.status) : "NAO_INICIADA",
+    itens: itens.map(function (i) {
+      const resposta = porItem[textoDe(i.item_id)];
+      return {
+        itemId: textoDe(i.item_id),
+        ordem: Number(i.ordem) || 0,
+        descricao: textoDe(i.descricao),
+        tipoEvidencia: textoDe(i.tipo_evidencia),
+        referencia: textoDe(i.referencia),
+        obrigatorio: ehVerdadeiro(i.obrigatorio),
+        valor: resposta ? textoDe(resposta.valor) : "",
+        registradoEm: resposta ? textoDe(resposta.registrado_em) : "",
+      };
+    }),
+  };
+}
+
+// --- Escrita ---------------------------------------------------------------
+
+/**
+ * Abre a execucao do dia. Idempotente pela chave (template_id, data): chamar
+ * duas vezes devolve o mesmo execucao_id e deixa uma linha so.
+ */
+function rotaChkAbrirExecucao(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const templateId = textoDe(payload.template_id);
+  const usuario = textoDe(payload.usuario).toLowerCase();
+  const data = dataISO(payload.data) || dataISO(new Date());
+  if (!templateId || !usuario) return { ok: false, error: "Informe o template e o usuario." };
+
+  const template = lerAba(ss, ABA_CHK_TEMPLATES).filter(function (t) {
+    return textoDe(t.template_id) === templateId;
+  })[0];
+  if (!template) return { ok: false, error: "Checklist nao encontrado." };
+  if (!podeExecutarTemplate(ss, template, usuario)) {
+    return { ok: false, error: "Este checklist e de " + textoDe(template.responsavel) + ".", codigo: 403 };
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const jaAberta = lerAba(ss, ABA_CHK_EXECUCOES).filter(function (e) {
+      return textoDe(e.template_id) === templateId && dataISO(e.data) === data;
+    })[0];
+    if (jaAberta) {
+      return { ok: true, execucaoId: textoDe(jaAberta.execucao_id), status: textoDe(jaAberta.status), reaproveitada: true };
+    }
+
+    const execucaoId = novoId("exe");
+    upsertLinha(ss, ABA_CHK_EXECUCOES,
+      function (e) { return textoDe(e.execucao_id) === execucaoId; },
+      {
+        execucao_id: execucaoId,
+        template_id: templateId,
+        data: data,
+        local: textoDe(template.local),
+        usuario: textoDe(template.responsavel).toLowerCase(),
+        status: "ABERTA",
+        iniciado_em: agoraISO(),
+        concluido_em: "",
+      });
+    return { ok: true, execucaoId: execucaoId, status: "ABERTA", reaproveitada: false };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Valida a evidencia de um item. Devolve string de erro ou "" quando passa.
+ *
+ * NUMERO aceita zero e recusa vazio: "nao tinha nenhum" e uma resposta,
+ * "nao respondi" nao e.
+ */
+function validarEvidencia(ss, item, valor, execucao) {
+  const tipo = textoDe(item.tipo_evidencia).toUpperCase();
+  const texto = textoDe(valor);
+
+  if (tipo === "TOGGLE") return "";
+
+  if (tipo === "NUMERO") {
+    if (texto === "") return "Preencha o numero. Zero vale como resposta; vazio nao.";
+    if (!isFinite(Number(texto.replace(",", ".")))) return "Valor invalido: " + texto;
+    return "";
+  }
+
+  if (tipo === "TEXTO") {
+    if (texto.length < 3) return "Escreva pelo menos 3 caracteres.";
+    return "";
+  }
+
+  if (tipo === "CONTAGEM") {
+    const referencia = textoDe(item.referencia);
+    if (!referencia) return "Este item pede contagem mas nao tem produto de referencia cadastrado.";
+    const local = textoDe(execucao.local).toUpperCase();
+    const data = dataISO(execucao.data);
+
+    const produto = lerAba(ss, ABA_PRODUTOS).filter(function (p) {
+      return normalizeName(p.nome_canonico) === normalizeName(referencia);
+    })[0];
+    if (!produto) return "Produto \"" + referencia + "\" nao existe no catalogo PRODUTOS.";
+
+    const temContagem = lerAba(ss, ABA_MOVIMENTOS).some(function (m) {
+      return textoDe(m.produto_id) === textoDe(produto.produto_id) &&
+        String(m.timestamp).slice(0, 10) === data &&
+        (textoDe(m.origem).toUpperCase() === local || textoDe(m.destino).toUpperCase() === local);
+    });
+    if (!temContagem) {
+      return "Falta a contagem de \"" + referencia + "\" em " + local + " no dia " + data +
+        ". Lance a contagem primeiro; este item so fecha com o movimento registrado.";
+    }
+    return "";
+  }
+
+  return "Tipo de evidencia desconhecido: " + tipo;
+}
+
+/**
+ * Responde um item. Upsert por (execucao_id, item_id): reenviar a mesma
+ * resposta tres vezes deixa uma linha so, com o timestamp da ultima.
+ */
+function rotaChkResponderItem(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const execucaoId = textoDe(payload.execucao_id);
+  const itemId = textoDe(payload.item_id);
+  const usuario = textoDe(payload.usuario).toLowerCase();
+  if (!execucaoId || !itemId || !usuario) return { ok: false, error: "Informe execucao, item e usuario." };
+
+  const execucao = lerAba(ss, ABA_CHK_EXECUCOES).filter(function (e) {
+    return textoDe(e.execucao_id) === execucaoId;
+  })[0];
+  if (!execucao) return { ok: false, error: "Execucao nao encontrada." };
+
+  const status = textoDe(execucao.status);
+  if (status !== "ABERTA") {
+    return { ok: false, error: "Esta execucao esta " + status + " e nao aceita mais resposta. Correcao e com o administrador." };
+  }
+
+  const template = lerAba(ss, ABA_CHK_TEMPLATES).filter(function (t) {
+    return textoDe(t.template_id) === textoDe(execucao.template_id);
+  })[0];
+  if (template && !podeExecutarTemplate(ss, template, usuario)) {
+    return { ok: false, error: "Este checklist e de " + textoDe(template.responsavel) + ".", codigo: 403 };
+  }
+
+  const item = lerAba(ss, ABA_CHK_ITENS).filter(function (i) { return textoDe(i.item_id) === itemId; })[0];
+  if (!item) return { ok: false, error: "Item nao encontrado." };
+
+  const erro = validarEvidencia(ss, item, payload.valor, execucao);
+  if (erro) return { ok: false, error: erro };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const anterior = lerAba(ss, ABA_CHK_RESPOSTAS).filter(function (r) {
+      return textoDe(r.execucao_id) === execucaoId && textoDe(r.item_id) === itemId;
+    })[0];
+    upsertLinha(ss, ABA_CHK_RESPOSTAS,
+      function (r) { return textoDe(r.execucao_id) === execucaoId && textoDe(r.item_id) === itemId; },
+      {
+        resposta_id: anterior ? textoDe(anterior.resposta_id) : novoId("res"),
+        execucao_id: execucaoId,
+        item_id: itemId,
+        valor: textoDe(payload.valor),
+        usuario: usuario,
+        registrado_em: agoraISO(),
+      });
+    return { ok: true, itemId: itemId, sobrescreveu: Boolean(anterior) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Conclui a execucao, ou devolve a lista de obrigatorios que faltam. */
+function rotaChkConcluir(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const execucaoId = textoDe(payload.execucao_id);
+  const usuario = textoDe(payload.usuario).toLowerCase();
+  if (!execucaoId) return { ok: false, error: "Informe a execucao." };
+
+  const execucao = lerAba(ss, ABA_CHK_EXECUCOES).filter(function (e) {
+    return textoDe(e.execucao_id) === execucaoId;
+  })[0];
+  if (!execucao) return { ok: false, error: "Execucao nao encontrada." };
+  if (textoDe(execucao.status) !== "ABERTA") {
+    return { ok: false, error: "Esta execucao esta " + textoDe(execucao.status) + "." };
+  }
+
+  const obrigatorios = lerAba(ss, ABA_CHK_ITENS).filter(function (i) {
+    return textoDe(i.template_id) === textoDe(execucao.template_id) && ehVerdadeiro(i.ativo) && ehVerdadeiro(i.obrigatorio);
+  });
+  const respondidos = {};
+  lerAba(ss, ABA_CHK_RESPOSTAS).forEach(function (r) {
+    if (textoDe(r.execucao_id) === execucaoId) respondidos[textoDe(r.item_id)] = textoDe(r.valor);
+  });
+
+  const pendentes = obrigatorios.filter(function (i) {
+    const valor = respondidos[textoDe(i.item_id)];
+    if (valor === undefined) return true;
+    return validarEvidencia(ss, i, valor, execucao) !== "";
+  }).map(function (i) { return { itemId: textoDe(i.item_id), descricao: textoDe(i.descricao) }; });
+
+  if (pendentes.length) {
+    return { ok: false, error: "Faltam " + pendentes.length + " item(ns) obrigatorio(s).", pendentes: pendentes };
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    upsertLinha(ss, ABA_CHK_EXECUCOES,
+      function (e) { return textoDe(e.execucao_id) === execucaoId; },
+      {
+        execucao_id: execucaoId,
+        template_id: textoDe(execucao.template_id),
+        data: dataISO(execucao.data),
+        local: textoDe(execucao.local),
+        usuario: textoDe(execucao.usuario),
+        status: "CONCLUIDA",
+        iniciado_em: textoDe(execucao.iniciado_em),
+        concluido_em: agoraISO(),
+      });
+    return { ok: true, execucaoId: execucaoId, status: "CONCLUIDA" };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// --- Painel, relatorio e CRUD (admin) --------------------------------------
+
+/** Grade do dia: quem devia fazer o que, e em que pe esta. */
+function rotaChkPainel(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const negado = exigirAdminChk(ss, payload.usuario);
+  if (negado) return negado;
+
+  const data = dataISO(payload.data) || dataISO(new Date());
+  const templates = lerAba(ss, ABA_CHK_TEMPLATES).filter(function (t) {
+    return templateDevidoNaData(t, data);
+  });
+  const execucoes = lerAba(ss, ABA_CHK_EXECUCOES).filter(function (e) { return dataISO(e.data) === data; });
+  const itens = lerAba(ss, ABA_CHK_ITENS).filter(function (i) { return ehVerdadeiro(i.ativo); });
+  const respostas = lerAba(ss, ABA_CHK_RESPOSTAS);
+
+  const celulas = templates.map(function (template) {
+    const execucao = execucoes.filter(function (e) {
+      return textoDe(e.template_id) === textoDe(template.template_id);
+    })[0];
+    const doTemplate = itens.filter(function (i) { return textoDe(i.template_id) === textoDe(template.template_id); });
+    const respondidos = execucao
+      ? respostas.filter(function (r) { return textoDe(r.execucao_id) === textoDe(execucao.execucao_id); }).length
+      : 0;
+    return {
+      templateId: textoDe(template.template_id),
+      nome: textoDe(template.nome),
+      local: textoDe(template.local),
+      momento: textoDe(template.momento),
+      responsavel: textoDe(template.responsavel),
+      status: execucao ? textoDe(execucao.status) : "NAO_INICIADA",
+      respondidos: respondidos,
+      totalItens: doTemplate.length,
+      concluidoEm: execucao ? textoDe(execucao.concluido_em) : "",
+    };
+  });
+
+  const pendencias = celulas.filter(function (c) { return c.status !== "CONCLUIDA"; });
+  return { ok: true, data: data, celulas: celulas, pendencias: pendencias };
+}
+
+/**
+ * Metricas por pessoa no periodo. Sem grafico: tabela resolve.
+ *
+ * "Devidas" conta os dias em que o template valia, nao as execucoes abertas —
+ * senao quem nunca abre o checklist teria 100% de conclusao.
+ */
+function rotaChkRelatorio(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const negado = exigirAdminChk(ss, payload.usuario);
+  if (negado) return negado;
+
+  const inicio = dataISO(payload.data_inicio);
+  const fim = dataISO(payload.data_fim);
+  if (!inicio || !fim) return { ok: false, error: "Informe data_inicio e data_fim." };
+  const filtroUsuario = textoDe(payload.usuario_alvo).toLowerCase();
+
+  const templates = lerAba(ss, ABA_CHK_TEMPLATES);
+  const itens = lerAba(ss, ABA_CHK_ITENS).filter(function (i) { return ehVerdadeiro(i.ativo); });
+  const execucoes = lerAba(ss, ABA_CHK_EXECUCOES).filter(function (e) {
+    const d = dataISO(e.data);
+    return d >= inicio && d <= fim;
+  });
+  const respostas = lerAba(ss, ABA_CHK_RESPOSTAS);
+  const respostasPorExecucao = {};
+  respostas.forEach(function (r) {
+    const id = textoDe(r.execucao_id);
+    if (!respostasPorExecucao[id]) respostasPorExecucao[id] = {};
+    respostasPorExecucao[id][textoDe(r.item_id)] = true;
+  });
+
+  // Quantos dias cada template era devido no periodo.
+  const devidasPorTemplate = {};
+  const dias = [];
+  for (let d = new Date(inicio + "T12:00:00"); dataISO(d) <= fim; d.setDate(d.getDate() + 1)) {
+    dias.push(dataISO(d));
+  }
+  templates.forEach(function (t) {
+    devidasPorTemplate[textoDe(t.template_id)] = dias.filter(function (dia) {
+      return templateDevidoNaData(t, dia);
+    }).length;
+  });
+
+  const porUsuario = {};
+  function balde(login) {
+    if (!porUsuario[login]) {
+      porUsuario[login] = { usuario: login, devidas: 0, concluidas: 0, expiradas: 0, abertas: 0, minutos: [], horas: [] };
+    }
+    return porUsuario[login];
+  }
+
+  templates.forEach(function (t) {
+    const login = textoDe(t.responsavel).toLowerCase();
+    if (filtroUsuario && login !== filtroUsuario) return;
+    balde(login).devidas += devidasPorTemplate[textoDe(t.template_id)] || 0;
+  });
+
+  execucoes.forEach(function (e) {
+    const login = textoDe(e.usuario).toLowerCase();
+    if (filtroUsuario && login !== filtroUsuario) return;
+    const b = balde(login);
+    const status = textoDe(e.status);
+    if (status === "CONCLUIDA") {
+      b.concluidas += 1;
+      const ini = new Date(textoDe(e.iniciado_em));
+      const fimEx = new Date(textoDe(e.concluido_em));
+      if (!isNaN(ini) && !isNaN(fimEx)) {
+        b.minutos.push((fimEx - ini) / 60000);
+        b.horas.push(fimEx.getHours() + fimEx.getMinutes() / 60);
+      }
+    } else if (status === "EXPIRADA") {
+      b.expiradas += 1;
+    } else {
+      b.abertas += 1;
+    }
+  });
+
+  const media = function (lista) {
+    if (!lista.length) return null;
+    return lista.reduce(function (s, v) { return s + v; }, 0) / lista.length;
+  };
+
+  const pessoas = Object.keys(porUsuario).map(function (login) {
+    const b = porUsuario[login];
+    const minutosMedios = media(b.minutos);
+    const horaMedia = media(b.horas);
+    return {
+      usuario: login,
+      devidas: b.devidas,
+      concluidas: b.concluidas,
+      expiradas: b.expiradas,
+      abertas: b.abertas,
+      taxaConclusao: b.devidas ? Math.round((b.concluidas / b.devidas) * 100) : null,
+      minutosMedios: minutosMedios === null ? null : Math.round(minutosMedios),
+      horarioMedio: horaMedia === null ? null :
+        ("0" + Math.floor(horaMedia)).slice(-2) + ":" + ("0" + Math.round((horaMedia % 1) * 60)).slice(-2),
+    };
+  }).sort(function (a, b) { return a.usuario.localeCompare(b.usuario); });
+
+  // Itens que mais ficam sem resposta, para saber o que ninguem consegue fazer.
+  const faltas = {};
+  execucoes.forEach(function (e) {
+    const respondidos = respostasPorExecucao[textoDe(e.execucao_id)] || {};
+    itens.filter(function (i) { return textoDe(i.template_id) === textoDe(e.template_id); })
+      .forEach(function (i) {
+        const id = textoDe(i.item_id);
+        if (!faltas[id]) faltas[id] = { itemId: id, descricao: textoDe(i.descricao), vezes: 0, faltou: 0 };
+        faltas[id].vezes += 1;
+        if (!respondidos[id]) faltas[id].faltou += 1;
+      });
+  });
+  const itensProblema = Object.keys(faltas).map(function (id) { return faltas[id]; })
+    .filter(function (f) { return f.faltou > 0; })
+    .sort(function (a, b) { return (b.faltou / b.vezes) - (a.faltou / a.vezes); })
+    .slice(0, 15)
+    .map(function (f) {
+      f.percentualFalta = Math.round((f.faltou / f.vezes) * 100);
+      return f;
+    });
+
+  return { ok: true, inicio: inicio, fim: fim, pessoas: pessoas, itensProblema: itensProblema };
+}
+
+/** CRUD de template e de item. Uma acao por chamada, sempre upsert. */
+function rotaChkCrudTemplate(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const negado = exigirAdminChk(ss, payload.usuario);
+  if (negado) return negado;
+
+  const operacao = textoDe(payload.operacao);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    if (operacao === "listar") {
+      return {
+        ok: true,
+        templates: lerAba(ss, ABA_CHK_TEMPLATES).map(function (t) {
+          return {
+            templateId: textoDe(t.template_id), nome: textoDe(t.nome), local: textoDe(t.local),
+            responsavel: textoDe(t.responsavel), momento: textoDe(t.momento),
+            diasSemana: textoDe(t.dias_semana), ativo: ehVerdadeiro(t.ativo),
+          };
+        }),
+        itens: lerAba(ss, ABA_CHK_ITENS).map(function (i) {
+          return {
+            itemId: textoDe(i.item_id), templateId: textoDe(i.template_id), ordem: Number(i.ordem) || 0,
+            descricao: textoDe(i.descricao), tipoEvidencia: textoDe(i.tipo_evidencia),
+            referencia: textoDe(i.referencia), obrigatorio: ehVerdadeiro(i.obrigatorio), ativo: ehVerdadeiro(i.ativo),
+          };
+        }).sort(function (a, b) { return a.ordem - b.ordem; }),
+      };
+    }
+
+    if (operacao === "salvarTemplate") {
+      const t = payload.template || {};
+      const momento = textoDe(t.momento).toUpperCase();
+      if (MOMENTOS_CHK.indexOf(momento) < 0) return { ok: false, error: "Momento invalido: " + momento };
+      if (!textoDe(t.nome)) return { ok: false, error: "Informe o nome do checklist." };
+      const id = textoDe(t.templateId) || novoId("tpl");
+      const existente = lerAba(ss, ABA_CHK_TEMPLATES).filter(function (x) { return textoDe(x.template_id) === id; })[0];
+      upsertLinha(ss, ABA_CHK_TEMPLATES,
+        function (x) { return textoDe(x.template_id) === id; },
+        {
+          template_id: id,
+          nome: textoDe(t.nome),
+          local: textoDe(t.local).toUpperCase(),
+          responsavel: textoDe(t.responsavel).toLowerCase(),
+          momento: momento,
+          dias_semana: textoDe(t.diasSemana),
+          ativo: t.ativo === false ? false : true,
+          criado_em: existente ? textoDe(existente.criado_em) : agoraISO(),
+        });
+      return { ok: true, templateId: id };
+    }
+
+    if (operacao === "salvarItem") {
+      const i = payload.item || {};
+      const tipo = textoDe(i.tipoEvidencia).toUpperCase();
+      if (TIPOS_EVIDENCIA.indexOf(tipo) < 0) return { ok: false, error: "Tipo de evidencia invalido: " + tipo };
+      if (!textoDe(i.descricao)) return { ok: false, error: "Descreva o item." };
+      if (tipo === "CONTAGEM" && !textoDe(i.referencia)) {
+        return { ok: false, error: "Item de CONTAGEM precisa do produto de referencia." };
+      }
+      const id = textoDe(i.itemId) || novoId("cki");
+      upsertLinha(ss, ABA_CHK_ITENS,
+        function (x) { return textoDe(x.item_id) === id; },
+        {
+          item_id: id,
+          template_id: textoDe(i.templateId),
+          ordem: Number(i.ordem) || 0,
+          descricao: textoDe(i.descricao),
+          tipo_evidencia: tipo,
+          referencia: textoDe(i.referencia),
+          obrigatorio: i.obrigatorio === false ? false : true,
+          ativo: i.ativo === false ? false : true,
+        });
+      return { ok: true, itemId: id };
+    }
+
+    return { ok: false, error: "Operacao desconhecida: " + operacao };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// --- Expiracao -------------------------------------------------------------
+
+/**
+ * Execucao ABERTA com mais de 24h da data operacional vira EXPIRADA.
+ * Nao apaga nada: expirada e read-only e continua contando como nao concluida
+ * no relatorio, que e o ponto.
+ *
+ * Ligue como gatilho diario no editor do Apps Script:
+ *   Acionadores > Adicionar acionador > chkExpirarAbertas > Baseado em tempo >
+ *   Contador de dias > entre 4h e 5h.
+ */
+function chkExpirarAbertas() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = garantirAba(ss, ABA_CHK_EXECUCOES);
+  const colStatus = CABECALHOS.CHK_EXECUCOES.indexOf("status") + 1;
+  const limite = Date.now() - HORAS_ATE_EXPIRAR * 3600000;
+  let expiradas = 0;
+
+  lerAbaComLinha(ss, ABA_CHK_EXECUCOES).forEach(function (e) {
+    if (textoDe(e.status) !== "ABERTA") return;
+    const data = dataISO(e.data);
+    if (!data) return;
+    // Meia-noite da data operacional + 24h.
+    if (new Date(data + "T00:00:00-03:00").getTime() >= limite) return;
+    sheet.getRange(e._row, colStatus).setValue("EXPIRADA");
+    expiradas += 1;
+  });
+
+  Logger.log("Execucoes expiradas: " + expiradas);
+  return expiradas;
+}
+
+// --- Mural -----------------------------------------------------------------
+
+/**
+ * Mural de recados. Qualquer usuario deixa um aviso; qualquer usuario marca
+ * como resolvido.
+ *
+ * Nao e gestor de tarefas: nao tem prazo, nao tem dono obrigatorio e nao
+ * entra em relatorio. O escopo da Fase 5 exclui tarefa pontual com prazo e
+ * dono de proposito, e o mural nao entra por essa porta — e um quadro de
+ * recados, do tamanho de um quadro de recados.
+ */
+function rotaMuralListar(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  garantirAba(ss, ABA_MURAL);
+  const incluirResolvidos = ehVerdadeiro(payload.incluirResolvidos);
+  const avisos = lerAba(ss, ABA_MURAL)
+    .filter(function (a) { return incluirResolvidos || textoDe(a.status) !== "RESOLVIDO"; })
+    .map(function (a) {
+      return {
+        avisoId: textoDe(a.aviso_id), texto: textoDe(a.texto), autor: textoDe(a.autor),
+        para: textoDe(a.para), status: textoDe(a.status) || "ABERTO",
+        criadoEm: textoDe(a.criado_em), resolvidoPor: textoDe(a.resolvido_por), resolvidoEm: textoDe(a.resolvido_em),
+      };
+    })
+    .sort(function (a, b) { return String(b.criadoEm).localeCompare(String(a.criadoEm)); });
+  return { ok: true, avisos: avisos };
+}
+
+function rotaMuralCriar(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const texto = textoDe(payload.texto);
+  const autor = textoDe(payload.usuario).toLowerCase();
+  if (texto.length < 3) return { ok: false, error: "Escreva pelo menos 3 caracteres." };
+  if (!autor) return { ok: false, error: "Informe o usuario." };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const id = novoId("avs");
+    upsertLinha(ss, ABA_MURAL,
+      function (a) { return textoDe(a.aviso_id) === id; },
+      {
+        aviso_id: id, criado_em: agoraISO(), autor: autor, texto: texto,
+        para: textoDe(payload.para).toLowerCase(), status: "ABERTO", resolvido_por: "", resolvido_em: "",
+      });
+    return { ok: true, avisoId: id };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function rotaMuralResolver(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const avisoId = textoDe(payload.aviso_id);
+  const usuario = textoDe(payload.usuario).toLowerCase();
+  if (!avisoId) return { ok: false, error: "Informe o aviso." };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const aviso = lerAba(ss, ABA_MURAL).filter(function (a) { return textoDe(a.aviso_id) === avisoId; })[0];
+    if (!aviso) return { ok: false, error: "Aviso nao encontrado." };
+    const reabrir = ehVerdadeiro(payload.reabrir);
+    upsertLinha(ss, ABA_MURAL,
+      function (a) { return textoDe(a.aviso_id) === avisoId; },
+      {
+        aviso_id: avisoId, criado_em: textoDe(aviso.criado_em), autor: textoDe(aviso.autor),
+        texto: textoDe(aviso.texto), para: textoDe(aviso.para),
+        status: reabrir ? "ABERTO" : "RESOLVIDO",
+        resolvido_por: reabrir ? "" : usuario,
+        resolvido_em: reabrir ? "" : agoraISO(),
+      });
+    return { ok: true, avisoId: avisoId, status: reabrir ? "ABERTO" : "RESOLVIDO" };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Cria as abas do modulo e semeia os seis checklists do escopo, sem itens —
+ * os itens sao cadastrados pela tela de admin. Rodar de novo nao duplica.
+ */
+function rotaChkBootstrap(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const negado = exigirAdminChk(ss, payload.usuario);
+  if (negado) return negado;
+
+  [ABA_CHK_TEMPLATES, ABA_CHK_ITENS, ABA_CHK_EXECUCOES, ABA_CHK_RESPOSTAS, ABA_MURAL].forEach(function (aba) {
+    garantirAba(ss, aba);
+  });
+
+  const semente = [
+    ["Pre-operacao Bar 22", "BAR22", "yvison", "PRE_OPERACAO"],
+    ["Pre-operacao Bar 23", "BAR23", "yvison", "PRE_OPERACAO"],
+    ["Contagem Estoque Central", "GERAL", "jon", "FECHAMENTO"],
+    ["Producao e pre-batch", "PRODUCAO", "sarah", "ABERTURA"],
+    ["Reposicao e vidraria", "BAR22", "daniel", "ABERTURA"],
+    ["Double-check geral", "GERAL", "yvison", "FECHAMENTO"],
+  ];
+
+  const existentes = lerAba(ss, ABA_CHK_TEMPLATES);
+  let criados = 0;
+  semente.forEach(function (linha) {
+    const jaTem = existentes.some(function (t) { return normalizeName(t.nome) === normalizeName(linha[0]); });
+    if (jaTem) return;
+    upsertLinha(ss, ABA_CHK_TEMPLATES,
+      function () { return false; },
+      {
+        template_id: novoId("tpl"), nome: linha[0], local: linha[1], responsavel: linha[2],
+        momento: linha[3], dias_semana: "", ativo: true, criado_em: agoraISO(),
+      });
+    criados += 1;
+  });
+
+  return { ok: true, criados: criados, existentes: existentes.length };
 }

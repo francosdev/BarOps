@@ -4,7 +4,9 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test:fichas": "node src/lib/fichas/fichas.test.mjs"
+    "test:fichas": "node src/lib/fichas/fichas.test.mjs",
+    "test:checklists": "node google-apps-script/testes/checklists.test.mjs",
+    "test": "npm run test:fichas && npm run test:checklists"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
