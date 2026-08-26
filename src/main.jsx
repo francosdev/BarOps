@@ -735,6 +735,46 @@ function contagemSuspeita(item) {
   return "";
 }
 
+/**
+ * Soma das parcelas de um item. É a função de soma da contagem por parcela.
+ *
+ * Parcela em branco é ignorada — não entra como zero e não quebra a conta.
+ * Isso importa porque a linha nasce vazia quando alguém clica em "+ parcela",
+ * e o total não pode piscar errado enquanto a pessoa ainda não digitou.
+ */
+function somaDasParcelas(parcelas) {
+  return roundCount((parcelas || []).reduce((total, parcela) => (
+    String(parcela?.valor ?? "").trim() === "" ? total : total + numberValue(parcela.valor)
+  ), 0));
+}
+
+/**
+ * "84 (geladeira 1) + 44 (câmara)". Só sai com duas parcelas preenchidas ou
+ * mais: com uma só não há o que detalhar, e o envio fica igual ao de sempre.
+ */
+function detalheDasParcelas(item) {
+  const partes = (item.parcelas || [])
+    .filter((parcela) => String(parcela?.valor ?? "").trim() !== "")
+    .map((parcela) => {
+      const onde = String(parcela.onde || "").trim();
+      return onde ? `${roundCount(parcela.valor)} (${onde})` : `${roundCount(parcela.valor)}`;
+    });
+  return partes.length >= 2 ? partes.join(" + ") : "";
+}
+
+/**
+ * A observação que vai para a planilha: o texto de quem contou primeiro, o
+ * detalhamento das parcelas depois. O texto da pessoa nunca é sobrescrito —
+ * por isso a junção acontece aqui, na hora de montar o envio, e não no
+ * campo enquanto ela digita.
+ */
+function observacaoParaEnvio(item) {
+  const detalhe = detalheDasParcelas(item);
+  if (!detalhe) return item.observacao;
+  const escrito = String(item.observacao || "").trim();
+  return escrito ? `${escrito} — ${detalhe}` : detalhe;
+}
+
 function calcItemValues(item) {
   const abertura = roundCount(numberValue(item.aberturaInteira) + numberValue(item.aberturaFracionado));
   const fechamento = roundCount(numberValue(item.fechamentoInteira) + numberValue(item.fechamentoFracionado));
@@ -821,6 +861,8 @@ function migrateItem(item) {
     valorFardo,
     unidadesPorFardo,
     observacao: item.observacao || "",
+    // Lista vazia = contagem de sempre. Só vira parcela quando alguém pede.
+    parcelas: Array.isArray(item.parcelas) ? item.parcelas : [],
     aberturaContada: Boolean(item.aberturaContada || item.quantidadeInteira || item.fracionado),
     fechamentoContado: Boolean(item.fechamentoContado || item.contado),
   };
@@ -862,7 +904,7 @@ function inventoryToSheetRows(inventory) {
     valor_total: roundCount(numberValue(item.quantidade) * numberValue(item.valorUnitario)),
     par_stock: item.parStock,
     reposicao_sugerida: item.reposicaoSugerida,
-    observacao: item.observacao,
+    observacao: observacaoParaEnvio(item),
     enviado_em: inventory.enviadoEm,
   }));
 }
@@ -904,7 +946,11 @@ function inventoryToWorkbookPayload(inventory) {
         produtoId: item.produtoId,
         quantidade: numberValue(item.quantidade),
         unidade: item.unidade,
-        observacao: item.observacao,
+        observacao: observacaoParaEnvio(item),
+        // Só aparece quando existe: sem parcela, o payload sai idêntico ao
+        // que o backend já recebia. A planilha ignora o campo; ele viaja
+        // para o log poder auditar de onde veio cada pedaço.
+        ...(item.parcelas?.length ? { parcelas: item.parcelas } : {}),
       })),
   };
 }
@@ -1114,6 +1160,11 @@ function App() {
     if (draft) saveJson(STORAGE_KEYS.draft, draft);
     else localStorage.removeItem(STORAGE_KEYS.draft);
   }, [draft]);
+  // Trocar de tela volta ao topo. Sem isto, sair de uma lista longa e abrir
+  // outra tela deixava a pessoa no meio dela — e, com a barra fixa por cima,
+  // o título nem aparecia. Vale também na primeira renderização, porque o
+  // navegador restaura a rolagem depois de um refresh.
+  useEffect(() => { window.scrollTo(0, 0); }, [screen]);
 
   function notify(message) {
     setToast(message);
@@ -1376,7 +1427,7 @@ function App() {
 function Header({ user, onHome, onLogout }) {
   return (
     <header className="topbar">
-      <button className="iconButton" onClick={onHome} aria-label="Início">⌂</button>
+      <button className="iconButton" onClick={onHome} aria-label="Início"><Icone nome="casa" /></button>
       <img className="topbarLogo" src={ephigeniaLogo} alt="" />
       <div>
         <strong>Ephigenia</strong>
@@ -1431,27 +1482,108 @@ function LoginScreen({ onLogin }) {
   );
 }
 
+/**
+ * Ícones de traço, desenhados aqui mesmo. Nenhuma biblioteca: são doze
+ * caminhos, e uma dependência de ícones custaria mais bytes do que o app
+ * inteiro de CSS.
+ *
+ * Todos na mesma grade de 24, sem preenchimento, traço de 1,5 e ponta
+ * arredondada — é o que faz um conjunto parecer um conjunto. A cor sai de
+ * `currentColor`, então o ícone acompanha o estado do botão sozinho.
+ */
+const ICONES = {
+  rascunho: <><circle cx="12" cy="12" r="9" /><path d="M10.5 9.2l5 2.8-5 2.8z" /></>,
+  inventario: <><path d="M9 4H6.5A1.5 1.5 0 005 5.5v14A1.5 1.5 0 006.5 21h11a1.5 1.5 0 001.5-1.5v-14A1.5 1.5 0 0017.5 4H15" /><rect x="9" y="2.5" width="6" height="3" rx="1" /><path d="M8.5 11h7M8.5 15h4.5" /></>,
+  ficha: <><path d="M6 3.5h9.5A2.5 2.5 0 0118 6v14.5H8.5A2.5 2.5 0 016 18z" /><path d="M6 18h12" /><path d="M9 8h6M9 11.5h4" /></>,
+  requisicao: <><path d="M4 8.5h13M14 5.5l3 3-3 3" /><path d="M20 15.5H7M10 12.5l-3 3 3 3" /></>,
+  calculadora: <><rect x="5" y="2.5" width="14" height="19" rx="2.5" /><path d="M8.5 6.5h7" /><path d="M9 12h.01M12 12h.01M15 12h.01M9 16h.01M12 16h.01M15 16h.01" /></>,
+  estoque: <><path d="M3.5 7.5l8.5-4 8.5 4v9l-8.5 4-8.5-4z" /><path d="M3.5 7.5l8.5 4 8.5-4" /><path d="M12 11.5v9" /></>,
+  movimentos: <><path d="M3 13h3.5l2.5-7 4 14 2.5-7H21" /></>,
+  produtos: <><path d="M3.5 7.5l8.5-4 8.5 4-8.5 4z" /><path d="M3.5 7.5v9l8.5 4 8.5-4v-9" /><path d="M7.75 9.5v4.25" /></>,
+  usuarios: <><circle cx="9.5" cy="8" r="3.5" /><path d="M3.5 20a6 6 0 0112 0" /><path d="M16 4.9a3.5 3.5 0 010 6.2" /><path d="M17.5 14.6A6 6 0 0120.5 20" /></>,
+  nuvem: <><path d="M7.5 18.5a4 4 0 01-.4-8A5.5 5.5 0 0118 9.6a3.9 3.9 0 01-.6 8.9z" /><path d="M12 12.5v4M10 14.5l2-2 2 2" /></>,
+  planilha: <><rect x="3" y="4" width="18" height="16" rx="2.5" /><path d="M3 9.5h18" /><path d="M9.5 9.5V20" /></>,
+  frasco: <><path d="M10 3.5h4M11 3.5v5.2L6.6 17a2.2 2.2 0 001.9 3.3h7a2.2 2.2 0 001.9-3.3L13 8.7V3.5" /><path d="M8.2 14h7.6" /></>,
+  garrafa: <><path d="M10 2.5h4v3.6a3 3 0 00.6 1.8l1.2 1.6a3 3 0 01.6 1.8v8.2a2 2 0 01-2 2h-4.8a2 2 0 01-2-2v-8.2a3 3 0 01.6-1.8l1.2-1.6a3 3 0 00.6-1.8z" /><path d="M7.6 13h8.8" /></>,
+  pesar: <><path d="M12 3.5v3" /><circle cx="12" cy="7.8" r="1.3" /><path d="M6.5 20.5h11a1.5 1.5 0 001.4-2L15.4 9H8.6l-3.5 9.5a1.5 1.5 0 001.4 2z" /></>,
+  balanca: <><path d="M12 4v16M7 20h10" /><path d="M4.5 5.5l15-1.5" /><path d="M4.5 5.5L2 12a2.8 2.8 0 005 0z" /><path d="M19.5 4L17 10.5a2.8 2.8 0 005 0z" /></>,
+  lista: <><path d="M9 6h11M9 12h11M9 18h11" /><path d="M4.5 6h.01M4.5 12h.01M4.5 18h.01" /></>,
+  casa: <><path d="M4 10.5L12 4l8 6.5" /><path d="M6 9.8V19a1 1 0 001 1h10a1 1 0 001-1V9.8" /><path d="M10 20v-5.5h4V20" /></>,
+  atualizar: <><path d="M20 12a8 8 0 11-2.6-5.9" /><path d="M20.5 3.5v4h-4" /></>,
+  pendente: <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></>,
+  concluido: <><circle cx="12" cy="12" r="8.5" /><path d="M8.2 12.3l2.6 2.6 5-5.4" /></>,
+  parcial: <><circle cx="12" cy="12" r="8.5" /><path d="M12 3.5a8.5 8.5 0 000 17z" /></>,
+  recusado: <><circle cx="12" cy="12" r="8.5" /><path d="M9.2 9.2l5.6 5.6M14.8 9.2l-5.6 5.6" /></>,
+  remover: <><path d="M5 7h14" /><path d="M10 7V5.5a1 1 0 011-1h2a1 1 0 011 1V7" /><path d="M6.5 7l.8 12a1.5 1.5 0 001.5 1.4h6.4a1.5 1.5 0 001.5-1.4l.8-12" /><path d="M10.5 11v6M13.5 11v6" /></>,
+};
+
+function Icone({ nome, className = "" }) {
+  return (
+    <svg
+      className={`icone ${className}`.trim()}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {ICONES[nome]}
+    </svg>
+  );
+}
+
+// Um item do menu inicial. É um botão inteiro, não um ícone com legenda: o
+// alvo do dedo é o cartão todo.
+function MenuTile({ icone, rotulo, variante = "", onClick }) {
+  return (
+    <button type="button" className={`menuTile ${variante}`.trim()} onClick={onClick}>
+      <Icone nome={icone} />
+      <span>{rotulo}</span>
+    </button>
+  );
+}
+
 function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onStock, onProducts, onUsers, onIntegration, onSheetUsers, onMovements, onFichas, onPreBatch, onRequisicoes }) {
+  // Dois grupos porque são dez portas: o que se usa no turno e o que se
+  // ajusta de vez em quando. Quem não é admin só vê o primeiro, e aí o
+  // título do grupo não aparece — um grupo só não precisa de nome.
+  const operacao = [
+    hasDraft && { icone: "rascunho", rotulo: "Continuar rascunho", variante: "destaque", onClick: onResume },
+    { icone: "inventario", rotulo: "Novo inventário", variante: "principal", onClick: onNew },
+    { icone: "requisicao", rotulo: "Requisições", onClick: onRequisicoes },
+    { icone: "calculadora", rotulo: "Pré-batch", onClick: onPreBatch },
+    { icone: "ficha", rotulo: "Fichas técnicas", onClick: onFichas },
+  ].filter(Boolean);
+
+  const gestao = isAdmin ? [
+    { icone: "estoque", rotulo: "Estoque atual", onClick: onStock },
+    { icone: "movimentos", rotulo: "Movimentos", onClick: onMovements },
+    { icone: "produtos", rotulo: "Produtos", onClick: onProducts },
+    { icone: "usuarios", rotulo: "Usuários", onClick: onUsers },
+    { icone: "nuvem", rotulo: "Usuários da planilha", onClick: onSheetUsers },
+    { icone: "planilha", rotulo: "Planilha", onClick: onIntegration },
+  ] : [];
+
   return (
     <main className="screen">
       <p className="eyebrow">Olá, {user?.nome}.</p>
-      <h1>{isAdmin ? "Painel do admin" : "O que vamos contar hoje?"}</h1>
-      {!isAdmin && <p className="roleNotice">{rotuloPerfis(user?.perfis)}: acesso liberado para contagens e requisições.</p>}
-      <div className="actionGrid">
-        {hasDraft && <Button onClick={onResume} variant="amber">Continuar rascunho</Button>}
-        <Button onClick={onNew}>Novo inventário</Button>
-        {/* Consulta liberada para todos os perfis. */}
-        <Button onClick={onFichas} variant="secondary">Fichas técnicas</Button>
-        <Button onClick={onRequisicoes} variant="secondary">Requisições</Button>
-        <Button onClick={onPreBatch} variant="secondary">Calculadora de pré-batch</Button>
-        {isAdmin && <Button onClick={onStock} variant="secondary">Estoque atual</Button>}
-        {/* Uma porta só para saldo, lançamento e contagem enviada. */}
-        {isAdmin && <Button onClick={onMovements} variant="secondary">Movimentos</Button>}
-        {isAdmin && <Button onClick={onProducts} variant="secondary">Produtos</Button>}
-        {isAdmin && <Button onClick={onUsers} variant="secondary">Usuários (reserva)</Button>}
-        {isAdmin && <Button onClick={onSheetUsers} variant="secondary">Usuários da planilha</Button>}
-        {isAdmin && <Button onClick={onIntegration} variant="secondary">Planilha</Button>}
+      <h1>{isAdmin ? "Painel do admin" : "O que vamos fazer hoje?"}</h1>
+
+      <div className="menuGrid">
+        {operacao.map((item) => <MenuTile key={item.rotulo} {...item} />)}
       </div>
+
+      {gestao.length > 0 && (
+        <>
+          <p className="label menuSecao">Gestão</p>
+          <div className="menuGrid">
+            {gestao.map((item) => <MenuTile key={item.rotulo} {...item} />)}
+          </div>
+        </>
+      )}
     </main>
   );
 }
@@ -1578,13 +1710,55 @@ function InventoryCountScreen({ inventory, onChange, onReview, onBack }) {
   );
 }
 
+// Uma parcela: quanto e onde. O "onde" é opcional — quem só quer somar dois
+// números não é obrigado a nomear os lugares.
+function LinhaParcela({ parcela, onChange, onRemover, podeRemover }) {
+  return (
+    <div className="parcelaLinha">
+      {/* text, não number: <input type="number"> recusa a vírgula, e na
+          bancada se digita "4,5". Com inputMode="decimal" o teclado do
+          celular continua sendo o numérico, e numberValue já normaliza a
+          vírgula na hora de somar. */}
+      <input
+        className="parcelaValor"
+        type="text"
+        inputMode="decimal"
+        placeholder="0"
+        value={parcela.valor}
+        onChange={(event) => onChange({ ...parcela, valor: event.target.value.replace(/[^\d.,]/g, "") })}
+      />
+      <input
+        className="parcelaOnde"
+        type="text"
+        placeholder="onde (opcional)"
+        value={parcela.onde}
+        onChange={(event) => onChange({ ...parcela, onde: event.target.value })}
+      />
+      <button
+        type="button"
+        className="parcelaRemover"
+        onClick={onRemover}
+        disabled={!podeRemover}
+        aria-label="Remover parcela"
+        title="Remover parcela"
+      >
+        <Icone nome="remover" />
+      </button>
+    </div>
+  );
+}
+
 function ProductCard({ item, onChange }) {
   const nextCounted = !item.fechamentoContado;
   const itemUnitPrice = numberValue(item.valorFardo) && numberValue(item.unidadesPorFardo)
     ? roundCount(numberValue(item.valorFardo) / numberValue(item.unidadesPorFardo))
     : numberValue(item.valorUnitario);
   const unitsPerPack = defaultUnitsPerPack(item);
-  const totalQuantity = roundCount(numberValue(item.quantidadeUnidades) + (numberValue(item.quantidadeFardos) * unitsPerPack));
+  const parcelas = item.parcelas || [];
+  const emParcelas = parcelas.length > 0;
+  const totalQuantity = emParcelas
+    ? somaDasParcelas(parcelas)
+    : roundCount(numberValue(item.quantidadeUnidades) + (numberValue(item.quantidadeFardos) * unitsPerPack));
   const alerta = contagemSuspeita(item);
 
   function changeMixedQuantity(patch) {
@@ -1601,6 +1775,50 @@ function ProductCard({ item, onChange }) {
     });
   }
 
+  // A quantidade continua sendo um número só: a soma das parcelas. O backend
+  // e a planilha não sabem que isto existe.
+  function aplicarParcelas(proximas) {
+    const quantidade = somaDasParcelas(proximas);
+    onChange({
+      parcelas: proximas,
+      modoContagem: "misto",
+      quantidade,
+      fechamentoInteira: quantidade,
+      fechamentoContado: quantidade > 0 || Boolean(item.observacao.trim()),
+      aberturaContada: quantidade > 0 || Boolean(item.observacao.trim()),
+    });
+  }
+
+  // A primeira parcela nasce com o que já estava digitado, senão o número
+  // contado se perderia no clique.
+  function abrirParcelas() {
+    aplicarParcelas([
+      { valor: totalQuantity ? String(totalQuantity) : "", onde: "" },
+      { valor: "", onde: "" },
+    ]);
+  }
+
+  // Sobrando uma parcela só, a contagem volta ao campo simples: uma parcela
+  // não é parcela, e o payload tem que sair igual ao de sempre.
+  function removerParcela(indice) {
+    const restantes = parcelas.filter((_, i) => i !== indice);
+    if (restantes.length <= 1) {
+      const sobrou = numberValue(restantes[0]?.valor);
+      onChange({
+        parcelas: [],
+        modoContagem: "misto",
+        quantidadeUnidades: sobrou,
+        quantidadeFardos: 0,
+        quantidade: sobrou,
+        fechamentoInteira: sobrou,
+        fechamentoContado: sobrou > 0 || Boolean(item.observacao.trim()),
+        aberturaContada: sobrou > 0 || Boolean(item.observacao.trim()),
+      });
+      return;
+    }
+    aplicarParcelas(restantes);
+  }
+
   return (
     <article className={`productCard cleanCard ${item.fechamentoContado ? "isCounted" : "isPending"} ${item.observacao ? "hasNote" : ""} ${alerta ? "hasAlert" : ""}`}>
       <div className="cardHead">
@@ -1608,6 +1826,10 @@ function ProductCard({ item, onChange }) {
           <h3>{item.nome}</h3>
           <span>{getOperationalCategory(item)}{unitsPerPack ? ` · ${unitsPerPack} un/${packLabel(item)}` : itemUnitPrice ? ` · R$ ${itemUnitPrice.toFixed(2)}` : ""}</span>
         </div>
+        {/* Com parcelas o total sobe para o cabeçalho: é o número que a
+            pessoa está construindo, e ele fica visível enquanto ela digita
+            lá embaixo. Aí a linha "Total" de baixo sairia repetida. */}
+        {emParcelas && <strong className="totalParcelas">Total: {totalQuantity}</strong>}
         <button
           type="button"
           className={`countToggle ${item.fechamentoContado ? "selected" : ""}`}
@@ -1616,11 +1838,33 @@ function ProductCard({ item, onChange }) {
           {item.fechamentoContado ? "Contado" : "Marcar"}
         </button>
       </div>
-      <div className="fieldGrid mixedCountGrid">
-        <NumberField label="Unidades" value={item.quantidadeUnidades} onChange={(quantidadeUnidades) => changeMixedQuantity({ quantidadeUnidades })} />
-        <NumberField label={packLabel(item) === "caixa" ? "Caixas" : "Fardos"} value={item.quantidadeFardos} onChange={(quantidadeFardos) => changeMixedQuantity({ quantidadeFardos })} />
-      </div>
-      <p className="countTotal">Total: {totalQuantity}</p>
+
+      {emParcelas ? (
+        <div className="parcelaLista">
+          {parcelas.map((parcela, indice) => (
+            <LinhaParcela
+              key={indice}
+              parcela={parcela}
+              podeRemover={parcelas.length > 1}
+              onChange={(proxima) => aplicarParcelas(parcelas.map((atual, i) => (i === indice ? proxima : atual)))}
+              onRemover={() => removerParcela(indice)}
+            />
+          ))}
+        </div>
+      ) : (
+        <>
+          <div className="fieldGrid mixedCountGrid">
+            <NumberField label="Unidades" value={item.quantidadeUnidades} onChange={(quantidadeUnidades) => changeMixedQuantity({ quantidadeUnidades })} />
+            <NumberField label={packLabel(item) === "caixa" ? "Caixas" : "Fardos"} value={item.quantidadeFardos} onChange={(quantidadeFardos) => changeMixedQuantity({ quantidadeFardos })} />
+          </div>
+          <p className="countTotal">Total: {totalQuantity}</p>
+        </>
+      )}
+
+      <button type="button" className="addParcela" onClick={emParcelas ? () => aplicarParcelas([...parcelas, { valor: "", onde: "" }]) : abrirParcelas}>
+        + parcela
+      </button>
+
       {alerta && <p className="countAlert">⚠ {alerta}</p>}
       <Input label="Observação" value={item.observacao} onChange={(observacao) => onChange({ observacao })} placeholder="Opcional" />
     </article>
@@ -2511,7 +2755,7 @@ function PainelCalc({ icone, titulo, resumo, itens, onAbrir }) {
   const vazio = !itens.length;
   return (
     <button type="button" className={`calcTile ${vazio ? "vazio" : ""}`} onClick={onAbrir} disabled={vazio}>
-      <span className="calcTileIcone" aria-hidden="true">{icone}</span>
+      <Icone nome={icone} className="calcTileIcone" />
       <span className="calcTileContador">{itens.length}</span>
       <span className="calcTileNome">{titulo}</span>
       <span className="calcTileResumo">{vazio ? "nada aqui" : resumo}</span>
@@ -2779,7 +3023,7 @@ function PreBatchScreen({ onNotify }) {
   const paineis = [
     {
       chave: "produzir",
-      icone: "🥃",
+      icone: "garrafa",
       titulo: "Produzir",
       itens: galoes,
       resumo: `${somaLitros(galoes, "ml")} L em galão`,
@@ -2794,7 +3038,7 @@ function PreBatchScreen({ onNotify }) {
     },
     {
       chave: "producoes",
-      icone: "🧪",
+      icone: "frasco",
       titulo: "Produções",
       itens: producoesAFazer,
       resumo: `${somaLitros(producoesAFazer, "produzir")} L de base`,
@@ -2804,7 +3048,7 @@ function PreBatchScreen({ onNotify }) {
     },
     {
       chave: "estoque",
-      icone: "🍾",
+      icone: "estoque",
       titulo: "Do estoque",
       itens: plano.separacao,
       resumo: `${roundCount(plano.separacao.reduce((total, item) => total + item.unidades, 0))} un para subir`,
@@ -2819,7 +3063,7 @@ function PreBatchScreen({ onNotify }) {
     },
     {
       chave: "insumos",
-      icone: "🧂",
+      icone: "pesar",
       titulo: "Insumos",
       itens: plano.insumosBase,
       resumo: "pesar e medir",
@@ -2856,10 +3100,10 @@ function PreBatchScreen({ onNotify }) {
         <h1>Pré-batch</h1>
         <div className="calcModos">
           <button className={ehSugestao ? "selected" : ""} onClick={() => setModo("sugestao")} title="Sugestão pelo par">
-            ⚖<span>Sugestão</span>
+            <Icone nome="balanca" /><span>Sugestão</span>
           </button>
           <button className={!ehSugestao ? "selected" : ""} onClick={() => setModo("lista")} title="Montar a lista de produção">
-            📋<span>Lista</span>
+            <Icone nome="lista" /><span>Lista</span>
           </button>
         </div>
       </div>
@@ -2871,7 +3115,7 @@ function PreBatchScreen({ onNotify }) {
             <button className={arredondamento === "galao" ? "selected" : ""} onClick={() => setArredondamento("galao")}>Galão 5 L</button>
           </div>
           <button className="iconAcao" onClick={carregar} disabled={carregando} title="Atualizar saldo">
-            {carregando ? "…" : "⟳"}
+            <Icone nome="atualizar" className={carregando ? "girando" : ""} />
           </button>
           <span className="calcResumo">{totalLitros} L</span>
         </div>
@@ -2986,7 +3230,7 @@ function RequisicoesScreen({ products, user, onNotify }) {
       <div className="calcTopo">
         <h1>Requisições</h1>
         <button className="iconAcao" onClick={carregar} disabled={carregando} title="Atualizar">
-          {carregando ? "…" : "⟳"}
+          <Icone nome="atualizar" className={carregando ? "girando" : ""} />
         </button>
       </div>
 
@@ -3049,7 +3293,7 @@ function RequisicoesScreen({ products, user, onNotify }) {
   );
 }
 
-const ICONE_STATUS = { PENDENTE: "⏳", SEPARADO: "✅", PARCIAL: "◐", RECUSADO: "✕" };
+const ICONE_STATUS = { PENDENTE: "pendente", SEPARADO: "concluido", PARCIAL: "parcial", RECUSADO: "recusado" };
 
 // O card nao guarda o proprio aberto: a tela guarda qual esta aberto, e so um
 // fica. Cada card com estado proprio deixava a tela virar uma pilha de listas.
@@ -3057,7 +3301,7 @@ function CardRequisicao({ req, nomeDe, acao, aberto, onToggle }) {
   return (
     <section className={`bloco ${aberto ? "aberto" : ""}`}>
       <button type="button" className="blocoHead" onClick={onToggle}>
-        <span className="blocoIcone" aria-hidden="true">{ICONE_STATUS[req.status] || "•"}</span>
+        <Icone nome={ICONE_STATUS[req.status] || "pendente"} className="blocoIcone" />
         <strong>{req.destino}</strong>
         <span className="blocoContador">{req.itens.length}</span>
         <span className="blocoSeta" aria-hidden="true">{aberto ? "▾" : "▸"}</span>
@@ -3159,7 +3403,7 @@ function NovaRequisicao({ products, user, onPronto }) {
       {pedido.length > 0 && (
         <section className="bloco aberto pedidoResumo">
           <div className="blocoHead estatico">
-            <span className="blocoIcone" aria-hidden="true">📋</span>
+            <Icone nome="lista" className="blocoIcone" />
             <strong>Pedido</strong>
             <span className="blocoContador">{pedido.length}</span>
           </div>
