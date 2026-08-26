@@ -81,7 +81,7 @@ const unidades = (chave) => r.separacao.find((s) => s.chave === chave)?.unidades
 const base = (chave) => r.insumosBase.find((s) => s.chave === chave);
 
 console.log("PRODUZIR (L)");
-ok("Xar. açúcar", litros("prod-xarope-acucar"), 39.40, 0.006);
+ok("Xar. açúcar", litros("prod-xarope-acucar"), 39.12, 0.006);
 ok("Xar. mel", litros("prod-xarope-mel"), 6.57, 0.006);
 ok("Xar. framboesa", litros("prod-xarope-framboesa"), 7.67, 0.006);
 ok("Xar. manjericão", litros("prod-xarope-manjericao"), 8.00, 0.006);
@@ -89,14 +89,14 @@ ok("Ext. capim-limão", litros("prod-extrato-capim"), 6.27, 0.006);
 ok("Ext. gengibre", litros("prod-extrato-gengibre"), 2.09, 0.006);
 
 console.log("SUBIR DO ESTOQUE (unidades fechadas)");
-ok("Gin Tanqueray", unidades("tanqueray"), 51);
+ok("Gin Tanqueray", unidades("tanqueray"), 50);
 ok("Vodka Ketel One", unidades("ketel-one"), 16);
 ok("Ypioca Ouro", unidades("ypioca-ouro"), 11);
 ok("Martini Rosso", unidades("martini-rosso"), 8);
 ok("Campari", unidades("campari"), 6);
 
 console.log("INSUMOS BASE");
-ok("Açúcar (kg)", base("acucar").qtdReceita / 1000, 32.84, 0.006);
+ok("Açúcar (kg)", base("acucar").qtdReceita / 1000, 32.60, 0.006);
 ok("Mel (L)", base("mel").qtdReceita / 1000, 4.87, 0.006);
 ok("Gengibre (kg)", base("gengibre").qtdReceita / 1000, 5.97, 0.006);
 ok("Purê Monin (L)", base("pure-monin").qtdReceita / 1000, 4.04, 0.006);
@@ -105,8 +105,25 @@ ok("Capim-limão (g)", base("capim-limao").qtdReceita, 523, 0.5);
 ok("Manjericão (g)", base("manjericao").qtdReceita, 431, 0.5);
 ok("água fora da lista de insumos base", base("agua"), undefined);
 
+console.log("\n--- angostura do Fitz Gerald (corrigida em 26/08/2026) ---");
+// Carlos avisou que a ficha estava sem a angostura: são 3,2 ml por receita,
+// dentro do batch. A dose sobe de 70 para 73,2 ml e o rateio de TUDO que o
+// Fitz Gerald puxa muda junto — por isso seis números do teste de aceite
+// acima já não são os do documento da Fase 4. Estes aqui são a conta na mão:
+//
+//   dose        50 + 20 + 3,2                        = 73,2 ml
+//   doses/galão floor(5000 / 73,2)                   = 68
+//   gin         23000·50/73,2 + 23000·50/70 + 16000·30/90 = 37.472,29 ml
+//               ceil(37472,29 / 750)                 = 50 garrafas
+//   angostura   23000·3,2/73,2                       = 1.005,46 ml
+//               ceil(1005,46 / 100)                  = 11 garrafas
+ok("dose do Fitz Gerald com angostura", totalDoBatch("cq-fitz-gerald"), 73.2, 0.001);
+ok("angostura entra no batch, não no serviço", coquetelPorId("cq-fitz-gerald").batch.some((l) => l.insumo === "angostura"), true);
+ok("e vira linha de separação", r.separacao.find((s) => s.chave === "angostura")?.qtdReceita, 1005.46, 0.01);
+ok("em garrafa fechada de 100 ml", unidades("angostura"), 11);
+
 console.log("\n--- armadilhas que o escopo avisa ---");
-ok("prateleira somada, não descontada (≠ 23,40)", litros("prod-xarope-acucar") - 16 > 23.39, true);
+ok("prateleira somada, não descontada (≠ 23,12)", litros("prod-xarope-acucar") - 16 > 23.11, true);
 const comSaldo = explodirCascata({ saldos: { "cq-negroni": 16000 }, arredondamento: "litro" });
 ok("pré-batch no par não é produzido", comSaldo.preBatches.find((p) => p.chave === "cq-negroni").produzir, 0);
 ok("e some das garrafas (Campari zera)", comSaldo.separacao.find((s) => s.chave === "campari")?.unidades ?? 0, 0);
@@ -120,7 +137,7 @@ console.log("\n--- cruzamento com os números impressos na ficha ---");
 // A ficha imprime "Rende por galão de 5 L". Derivamos e conferimos.
 ok("Santa Cachaça: doses/galão", dosesPorGalao("cq-santa-cachaca"), 45);
 ok("Afrodite: doses/galão", dosesPorGalao("cq-afrodite"), 66);
-ok("Fitz Gerald: doses/galão", dosesPorGalao("cq-fitz-gerald"), 71);
+ok("Fitz Gerald: doses/galão", dosesPorGalao("cq-fitz-gerald"), 68);
 ok("Ephigenia: doses/galão", dosesPorGalao("cq-ephigenia"), 71);
 ok("Negroni: doses/galão", dosesPorGalao("cq-negroni"), 55);
 ok("par de 23 L em galões", parEmGaloes("cq-santa-cachaca"), 4.6, 0.001);

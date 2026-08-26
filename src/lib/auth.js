@@ -22,7 +22,7 @@ function sessaoLocal(usuario) {
     id: usuario.id,
     nome: usuario.nome,
     login: String(usuario.nome || "").trim().toLowerCase(),
-    perfis: normalizarPerfis(usuario.perfil),
+    perfis: normalizarPerfis(usuario.perfis ?? usuario.perfil),
     setores: usuario.setores || [],
     origem: "local",
   };

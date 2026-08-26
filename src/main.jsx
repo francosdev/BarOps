@@ -62,15 +62,37 @@ const ESPELHAR_MOVIMENTOS = true;
 const FATOR_ALERTA_CONTAGEM = 5;
 const PISO_ALERTA_CONTAGEM = 100;
 
+// Usuários de fábrica: existem em qualquer aparelho, sem cadastro, e servem
+// de reserva para quando a planilha não responde. A equipe entrou em
+// 26/08/2026 a pedido de Carlos, toda como líder de bar com requisição —
+// conta e pede, mas não separa nem mexe em cadastro.
+//
+// Os setores saem liberados para todos os bares porque o pedido não separou
+// quem cobre o quê; dá para restringir por pessoa na tela Usuários.
+const EQUIPE_PADRAO = [
+  ["user-sarah", "Sarah", "1020"],
+  ["user-daniel", "Daniel", "2030"],
+  ["user-yvison", "Yvison", "3040"],
+  ["user-jon", "Jon", "4060"],
+];
+
 const DEFAULT_USERS = [
   {
     id: "user-admin",
     nome: "Admin",
     pin: "2708",
-    perfil: "admin",
+    perfis: ["admin"],
     setores: BARS,
     ativo: true,
   },
+  ...EQUIPE_PADRAO.map(([id, nome, pin]) => ({
+    id,
+    nome,
+    pin,
+    perfis: ["lider_turno", "requisitante"],
+    setores: BARS,
+    ativo: true,
+  })),
 ];
 
 const CATEGORIES = [
@@ -433,7 +455,9 @@ function normalizeUser(user, index = 0) {
     id: user.id || uid("user"),
     nome: user.nome || `Usuário ${index + 1}`,
     pin: String(user.pin || ""),
-    perfil: user.perfil === "admin" ? "admin" : "lider",
+    // Um usuário acumula perfis, como na aba USUARIOS. Cadastro antigo
+    // guardava um `perfil` só ("admin" ou "lider"); normalizarPerfis converte.
+    perfis: normalizarPerfis(user.perfis ?? user.perfil),
     setores: Array.isArray(user.setores) && user.setores.length ? user.setores : BARS,
     ativo: user.ativo !== false,
   };
@@ -448,8 +472,12 @@ function loadUsers() {
   const migrated = users.map((user) => (
     user.id === "user-admin" && user.pin === "1234" ? { ...user, pin: "2708" } : user
   ));
-  const hasAdmin = migrated.some((user) => user.perfil === "admin");
-  return hasAdmin ? migrated : [...DEFAULT_USERS, ...migrated];
+  // Usuário de fábrica que o aparelho ainda não tem entra agora. Só entra o
+  // que falta: quem foi inativado continua inativado, porque o registro
+  // existe e não é recriado.
+  const existentes = new Set(migrated.map((user) => user.id));
+  const faltando = DEFAULT_USERS.filter((user) => !existentes.has(user.id)).map(normalizeUser);
+  return [...faltando, ...migrated];
 }
 
 function loadCurrentUser(users) {
@@ -472,7 +500,7 @@ function loadSession(users) {
     id: antigo.id,
     nome: antigo.nome,
     login: String(antigo.nome || "").trim().toLowerCase(),
-    perfis: normalizarPerfis(antigo.perfil),
+    perfis: normalizarPerfis(antigo.perfis ?? antigo.perfil),
     setores: antigo.setores,
     origem: "local",
   };
@@ -1636,15 +1664,61 @@ function InventoryDetailsScreen({ inventory, products, onBack, onNotify }) {
   );
 }
 
+/**
+ * Lista longa desenha só o começo. A tela de Produtos abria com 100+ cartões
+ * — 17 mil pixels de rolagem — e nenhum deles era o que a pessoa procurava.
+ * Quem procura um produto usa a busca; quem passa o olho não passa por 100.
+ *
+ * O teto volta ao início sempre que a lista muda de tamanho, senão filtrar
+ * deixaria um "mostrar mais" pendurado sobre três resultados.
+ */
+function useTeto(total, passo = 30) {
+  const [teto, setTeto] = useState(passo);
+  useEffect(() => { setTeto(passo); }, [total, passo]);
+  return [teto, () => setTeto((atual) => atual + passo)];
+}
+
+function MostrarMais({ resto, passo, onMais }) {
+  if (resto <= 0) return null;
+  return (
+    <div className="bottomActions">
+      <button className="ghostButton" onClick={onMais}>
+        Mostrar mais {Math.min(resto, passo)} — faltam {resto}
+      </button>
+    </div>
+  );
+}
+
 function ProductsScreen({ products, onChange }) {
   const emptyForm = { nome: "", categoria: "", tipoContagem: "", unidade: "", origemPlanilha: "Manual", fornecedor: "", parStock: 0, estoqueAtual: 0, valorUnitario: 0, valorFardo: 0, unidadesPorFardo: 0, setores: BARS, ativo: true };
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState("");
+  const [formAberto, setFormAberto] = useState(false);
   const [error, setError] = useState("");
+  const [busca, setBusca] = useState("");
+  const [categoria, setCategoria] = useState("");
+  const [verInativos, setVerInativos] = useState(false);
+
   const formPackLabel = packLabel({ nome: form.nome, categoria: form.categoria });
   const calculatedUnitPrice = numberValue(form.valorFardo) && numberValue(form.unidadesPorFardo)
     ? roundCount(numberValue(form.valorFardo) / numberValue(form.unidadesPorFardo))
     : numberValue(form.valorUnitario);
+
+  const query = busca.trim().toLowerCase();
+  const filtrados = products.filter((product) => (
+    (verInativos || product.ativo) &&
+    (!categoria || product.categoria === categoria) &&
+    (!query || product.nome.toLowerCase().includes(query))
+  ));
+  const [teto, mostrarMais] = useTeto(filtrados.length);
+  const visiveis = filtrados.slice(0, teto);
+
+  function fecharForm() {
+    setFormAberto(false);
+    setEditingId("");
+    setForm(emptyForm);
+    setError("");
+  }
 
   function saveProduct() {
     if (!form.nome.trim() || !form.categoria || !form.tipoContagem || !form.unidade || !form.setores.length) {
@@ -1658,8 +1732,7 @@ function ProductsScreen({ products, onChange }) {
     } else {
       onChange([{ ...product, id: uid("prod") }, ...products]);
     }
-    setForm(emptyForm);
-    setEditingId("");
+    fecharForm();
   }
 
   function edit(product) {
@@ -1679,7 +1752,7 @@ function ProductsScreen({ products, onChange }) {
       setores: product.setores,
       ativo: product.ativo,
     });
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    setFormAberto(true);
   }
 
   function toggleSector(sector) {
@@ -1691,53 +1764,32 @@ function ProductsScreen({ products, onChange }) {
 
   return (
     <main className="screen">
-      <h1>Produtos</h1>
-      <section className="panel stack">
-        <Input label="Nome" value={form.nome} onChange={(nome) => setForm({ ...form, nome })} />
-        <Select label="Categoria" value={form.categoria} onChange={(categoria) => setForm({ ...form, categoria })} options={["", ...CATEGORIES]} />
-        <Select label="Tipo de contagem" value={form.tipoContagem} onChange={(tipoContagem) => setForm({ ...form, tipoContagem })} options={["", "unidade", "garrafa"]} />
-        <div className="fieldGrid">
-          <Input label="Unidade" value={form.unidade} onChange={(unidade) => setForm({ ...form, unidade })} placeholder="un, kg, garrafas" />
-          <NumberField label="Par stock (mínimo)" value={form.parStock} onChange={(parStock) => setForm({ ...form, parStock })} />
-        </div>
-        <NumberField label="Estoque atual" value={form.estoqueAtual} onChange={(estoqueAtual) => setForm({ ...form, estoqueAtual })} />
-        <div className="fieldGrid">
-          <NumberField label="Valor unitário" value={form.valorUnitario} onChange={(valorUnitario) => setForm({ ...form, valorUnitario })} />
-          <NumberField label={formPackLabel === "caixa" ? "Valor da caixa" : "Valor do fardo"} value={form.valorFardo} onChange={(valorFardo) => setForm({ ...form, valorFardo })} />
-        </div>
-        <div className="sourceBanner">
-          <NumberField label={`Unid. por ${formPackLabel}`} value={form.unidadesPorFardo} onChange={(unidadesPorFardo) => setForm({ ...form, unidadesPorFardo })} />
-          <span>Unitário: R$ {calculatedUnitPrice.toFixed(2)}</span>
-        </div>
-        <Input label="Fornecedor" value={form.fornecedor} onChange={(fornecedor) => setForm({ ...form, fornecedor })} placeholder="Opcional" />
-        <Input label="Origem" value={form.origemPlanilha} onChange={(origemPlanilha) => setForm({ ...form, origemPlanilha })} />
-        <section>
-          <p className="label">Setores</p>
-          <div className="chipGrid">
-            {BARS.map((bar) => (
-              <button key={bar} type="button" className={form.setores.includes(bar) ? "selected" : ""} onClick={() => toggleSector(bar)}>{bar}</button>
-            ))}
-          </div>
-        </section>
-        <label className="toggle">
-          <input type="checkbox" checked={form.ativo} onChange={(event) => setForm({ ...form, ativo: event.target.checked })} />
-          Produto ativo
-        </label>
-        {error && <p className="error">{error}</p>}
-        <div className="bottomActions inline">
-          {editingId && <button className="ghostButton" onClick={() => { setEditingId(""); setForm(emptyForm); }}>Cancelar</button>}
-          <Button onClick={saveProduct}>{editingId ? "Salvar produto" : "Adicionar produto"}</Button>
-        </div>
-      </section>
+      <div className="screenTopo">
+        <h1>Produtos</h1>
+        <Button onClick={() => { setForm(emptyForm); setEditingId(""); setFormAberto(true); }}>Novo produto</Button>
+      </div>
+
+      <div className="filterGrid">
+        <Input label="Buscar" value={busca} onChange={setBusca} placeholder="Nome do produto" />
+        <Select label="Categoria" value={categoria} onChange={setCategoria} options={["", ...CATEGORIES]} />
+      </div>
+      <label className="toggle">
+        <input type="checkbox" checked={verInativos} onChange={(event) => setVerInativos(event.target.checked)} />
+        Mostrar inativos
+      </label>
+
+      <p className="miniText">{filtrados.length} produto(s){filtrados.length > visiveis.length ? ` · mostrando ${visiveis.length}` : ""}</p>
+
+      {!filtrados.length && <EmptyState title="Nenhum produto" text="Ajuste a busca ou a categoria." />}
       <div className="list">
-        {products.map((product) => (
+        {visiveis.map((product) => (
           <article className={`historyCard ${!product.ativo ? "inactive" : ""}`} key={product.id}>
             <div>
               <h3>{product.nome}</h3>
-              <p>{product.categoria} · {product.tipoContagem} · {product.unidade} · Par {product.parStock || "-"}</p>
-              <p>Unitário R$ {(product.valorUnitario || 0).toFixed(2)}{product.valorFardo ? ` · ${packLabel(product) === "caixa" ? "Caixa" : "Fardo"} R$ ${product.valorFardo.toFixed(2)} / ${product.unidadesPorFardo}` : ""}</p>
-              <p>{product.origemPlanilha} · {product.setores.join(", ")}{product.fornecedor ? ` · ${product.fornecedor}` : ""}</p>
-              <span className="status">{product.ativo ? "Ativo" : "Inativo"}</span>
+              {/* Duas linhas bastam: o resto está no formulário de edição. */}
+              <p>{product.categoria} · {product.unidade}{numberValue(product.parStock) ? ` · mínimo ${product.parStock}` : ""}</p>
+              {numberValue(product.valorUnitario) > 0 && <p>R$ {product.valorUnitario.toFixed(2)} a unidade</p>}
+              {!product.ativo && <span className="status">Inativo</span>}
             </div>
             <div className="rowActions">
               <button className="ghostButton compact" onClick={() => edit(product)}>Editar</button>
@@ -1751,23 +1803,79 @@ function ProductsScreen({ products, onChange }) {
           </article>
         ))}
       </div>
+      <MostrarMais resto={filtrados.length - visiveis.length} passo={30} onMais={mostrarMais} />
+
+      {formAberto && (
+        <Modal titulo={editingId ? "Editar produto" : "Novo produto"} onFechar={fecharForm}>
+          <div className="stack">
+            <Input label="Nome" value={form.nome} onChange={(nome) => setForm({ ...form, nome })} />
+            <Select label="Categoria" value={form.categoria} onChange={(valor) => setForm({ ...form, categoria: valor })} options={["", ...CATEGORIES]} />
+            <Select label="Tipo de contagem" value={form.tipoContagem} onChange={(tipoContagem) => setForm({ ...form, tipoContagem })} options={["", "unidade", "garrafa"]} />
+            <div className="fieldGrid">
+              <Input label="Unidade" value={form.unidade} onChange={(unidade) => setForm({ ...form, unidade })} placeholder="un, kg, garrafas" />
+              <NumberField label="Par stock (mínimo)" value={form.parStock} onChange={(parStock) => setForm({ ...form, parStock })} />
+            </div>
+            <NumberField label="Estoque atual" value={form.estoqueAtual} onChange={(estoqueAtual) => setForm({ ...form, estoqueAtual })} />
+            <div className="fieldGrid">
+              <NumberField label="Valor unitário" value={form.valorUnitario} onChange={(valorUnitario) => setForm({ ...form, valorUnitario })} />
+              <NumberField label={formPackLabel === "caixa" ? "Valor da caixa" : "Valor do fardo"} value={form.valorFardo} onChange={(valorFardo) => setForm({ ...form, valorFardo })} />
+            </div>
+            <div className="sourceBanner">
+              <NumberField label={`Unid. por ${formPackLabel}`} value={form.unidadesPorFardo} onChange={(unidadesPorFardo) => setForm({ ...form, unidadesPorFardo })} />
+              <span>Unitário: R$ {calculatedUnitPrice.toFixed(2)}</span>
+            </div>
+            <Input label="Fornecedor" value={form.fornecedor} onChange={(fornecedor) => setForm({ ...form, fornecedor })} placeholder="Opcional" />
+            <Input label="Origem" value={form.origemPlanilha} onChange={(origemPlanilha) => setForm({ ...form, origemPlanilha })} />
+            <section>
+              <p className="label">Setores</p>
+              <div className="chipGrid">
+                {BARS.map((bar) => (
+                  <button key={bar} type="button" className={form.setores.includes(bar) ? "selected" : ""} onClick={() => toggleSector(bar)}>{bar}</button>
+                ))}
+              </div>
+            </section>
+            <label className="toggle">
+              <input type="checkbox" checked={form.ativo} onChange={(event) => setForm({ ...form, ativo: event.target.checked })} />
+              Produto ativo
+            </label>
+            {error && <p className="error">{error}</p>}
+            <div className="bottomActions inline">
+              <button className="ghostButton" onClick={fecharForm}>Cancelar</button>
+              <Button onClick={saveProduct}>{editingId ? "Salvar produto" : "Adicionar produto"}</Button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </main>
   );
 }
 
 function UsersScreen({ users, onChange, currentUserId }) {
-  const emptyForm = { nome: "", pin: "", perfil: "lider", setores: BARS, ativo: true };
+  const emptyForm = { nome: "", pin: "", perfis: ["lider_turno"], setores: BARS, ativo: true };
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState("");
+  const [formAberto, setFormAberto] = useState(false);
   const [error, setError] = useState("");
+  const ehAdminNoForm = form.perfis.includes("admin");
+
+  function fecharForm() {
+    setFormAberto(false);
+    setEditingId("");
+    setForm(emptyForm);
+    setError("");
+  }
 
   function saveUser() {
     if (!form.nome.trim() || !form.pin.trim()) {
       setError("Preencha nome e PIN.");
       return;
     }
-    if (form.perfil === "lider" && !form.setores.length) {
-      setError("Selecione pelo menos um setor para o líder.");
+    if (!form.perfis.length) {
+      setError("Selecione pelo menos um perfil.");
+      return;
+    }
+    if (!ehAdminNoForm && !form.setores.length) {
+      setError("Selecione pelo menos um setor.");
       return;
     }
     const duplicate = users.some((user) => user.id !== editingId && user.nome.trim().toLowerCase() === form.nome.trim().toLowerCase());
@@ -1782,20 +1890,13 @@ function UsersScreen({ users, onChange, currentUserId }) {
     } else {
       onChange([{ ...nextUser, id: uid("user") }, ...users]);
     }
-    setForm(emptyForm);
-    setEditingId("");
+    fecharForm();
   }
 
   function edit(user) {
     setEditingId(user.id);
-    setForm({
-      nome: user.nome,
-      pin: user.pin,
-      perfil: user.perfil,
-      setores: user.setores,
-      ativo: user.ativo,
-    });
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    setForm({ nome: user.nome, pin: user.pin, perfis: user.perfis, setores: user.setores, ativo: user.ativo });
+    setFormAberto(true);
   }
 
   function toggleSector(sector) {
@@ -1805,6 +1906,13 @@ function UsersScreen({ users, onChange, currentUserId }) {
     setForm({ ...form, setores });
   }
 
+  function togglePerfil(perfil) {
+    const perfis = form.perfis.includes(perfil)
+      ? form.perfis.filter((item) => item !== perfil)
+      : [...form.perfis, perfil];
+    setForm({ ...form, perfis, setores: perfis.includes("admin") ? BARS : form.setores });
+  }
+
   function toggleActive(user) {
     if (user.id === currentUserId) return;
     onChange(users.map((item) => item.id === user.id ? { ...item, ativo: !item.ativo } : item));
@@ -1812,11 +1920,31 @@ function UsersScreen({ users, onChange, currentUserId }) {
 
   return (
     <main className="screen">
-      <h1>Usuários</h1>
-      <section className="panel stack">
+      <div className="screenTopo">
+        <h1>Usuários</h1>
+        <Button onClick={() => { setForm(emptyForm); setEditingId(""); setFormAberto(true); }}>Novo usuário</Button>
+      </div>
+      {formAberto && (
+      <Modal titulo={editingId ? "Editar usuário" : "Novo usuário"} onFechar={fecharForm}>
+      <section className="stack">
         <Input label="Nome do usuário" value={form.nome} onChange={(nome) => setForm({ ...form, nome })} />
         <Input label="PIN" type="password" value={form.pin} onChange={(pin) => setForm({ ...form, pin })} />
-        <Select label="Perfil" value={form.perfil} onChange={(perfil) => setForm({ ...form, perfil, setores: perfil === "admin" ? BARS : form.setores })} options={["lider", "admin"]} />
+        <section>
+          <p className="label">Perfis</p>
+          <div className="chipGrid">
+            {CODIGOS_PERFIS.map((perfil) => (
+              <button
+                key={perfil}
+                type="button"
+                className={form.perfis.includes(perfil) ? "selected" : ""}
+                onClick={() => togglePerfil(perfil)}
+                title={PERFIS[perfil].descricao}
+              >
+                {PERFIS[perfil].nome}
+              </button>
+            ))}
+          </div>
+        </section>
         <section>
           <p className="label">Setores permitidos</p>
           <div className="chipGrid">
@@ -1826,7 +1954,7 @@ function UsersScreen({ users, onChange, currentUserId }) {
                 type="button"
                 className={form.setores.includes(bar) ? "selected" : ""}
                 onClick={() => toggleSector(bar)}
-                disabled={form.perfil === "admin"}
+                disabled={ehAdminNoForm}
               >
                 {bar}
               </button>
@@ -1839,16 +1967,18 @@ function UsersScreen({ users, onChange, currentUserId }) {
         </label>
         {error && <p className="error">{error}</p>}
         <div className="bottomActions inline">
-          {editingId && <button className="ghostButton" onClick={() => { setEditingId(""); setForm(emptyForm); }}>Cancelar</button>}
+          <button className="ghostButton" onClick={fecharForm}>Cancelar</button>
           <Button onClick={saveUser}>{editingId ? "Salvar usuário" : "Cadastrar usuário"}</Button>
         </div>
       </section>
+      </Modal>
+      )}
       <div className="list">
         {users.map((user) => (
           <article className={`historyCard ${!user.ativo ? "inactive" : ""}`} key={user.id}>
             <div>
               <h3>{user.nome}</h3>
-              <p>{user.perfil === "admin" ? "Admin" : "Líder"} · {user.setores.join(", ")}</p>
+              <p>{rotuloPerfis(user.perfis)} · {user.setores.join(", ")}</p>
               <span className="status">{user.ativo ? "Ativo" : "Inativo"}</span>
             </div>
             <div className="rowActions">
@@ -1867,10 +1997,6 @@ function UsersScreen({ users, onChange, currentUserId }) {
     </main>
   );
 }
-
-// A tela "Base da planilha" saiu em 26/08/2026: era um painel inteiro para
-// três botões de manutenção que se usa uma vez por planilha. Eles vivem aqui,
-// junto da URL que os faz funcionar — a listagem do catálogo não voltou,
 // porque quem quer ver o catálogo abre a aba PRODUTOS.
 function IntegrationScreen({ integration, onChange, products, onNotify }) {
   const [form, setForm] = useState({ appsScriptUrl: integration.appsScriptUrl || "" });
@@ -2065,6 +2191,8 @@ function StockScreen({ products, integration, onIntegrationChange, onSync, onNot
   const lowCount = rows.filter((product) => stockLevel(product) === "baixo").length;
   const emptyCount = rows.filter((product) => stockLevel(product) === "zerado").length;
   const colunas = grade?.cabecalhos || [];
+  const [teto, mostrarMais] = useTeto(rows.length);
+  const visiveis = rows.slice(0, teto);
 
   return (
     <main className="screen">
@@ -2124,7 +2252,7 @@ function StockScreen({ products, integration, onIntegrationChange, onSync, onNot
       </div>
       {!rows.length && <EmptyState title="Nenhum produto" text="Ajuste a busca para ver outros itens." />}
       <div className="list">
-        {rows.map((product) => {
+        {visiveis.map((product) => {
           const level = stockLevel(product);
           return (
             <article className={`historyCard stockRow ${level}`} key={product.id}>
@@ -2140,6 +2268,7 @@ function StockScreen({ products, integration, onIntegrationChange, onSync, onNot
           );
         })}
       </div>
+      <MostrarMais resto={rows.length - visiveis.length} passo={30} onMais={mostrarMais} />
     </main>
   );
 }
@@ -2179,7 +2308,14 @@ function SheetUsersScreen({ onNotify }) {
   const [usuarios, setUsuarios] = useState([]);
   const [form, setForm] = useState(emptyForm);
   const [status, setStatus] = useState("");
+  const [formAberto, setFormAberto] = useState(false);
   const [ocupado, setOcupado] = useState(false);
+
+  function fecharForm() {
+    setFormAberto(false);
+    setForm(emptyForm);
+    setStatus("");
+  }
 
   async function carregar() {
     setOcupado(true);
@@ -2211,7 +2347,7 @@ function SheetUsersScreen({ onNotify }) {
     setOcupado(true);
     try {
       await salvarUsuarios([{ ...form, perfil: form.perfis.join(", ") }]);
-      setForm(emptyForm);
+      fecharForm();
       await carregar();
       const mensagem = "Usuário salvo na planilha.";
       setStatus(mensagem);
@@ -2226,7 +2362,7 @@ function SheetUsersScreen({ onNotify }) {
   function editar(usuario) {
     // Senha em branco na edição significa "mantém a que já está lá".
     setForm({ usuarioId: usuario.usuarioId, nome: usuario.nome, login: usuario.login, senha: "", perfis: usuario.perfis, ativo: usuario.ativo });
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    setFormAberto(true);
   }
 
   function alternarPerfil(perfil) {
@@ -2238,12 +2374,18 @@ function SheetUsersScreen({ onNotify }) {
 
   return (
     <main className="screen">
-      <h1>Usuários da planilha</h1>
+      <div className="screenTopo">
+        <h1>Usuários da planilha</h1>
+        <Button onClick={() => { setForm(emptyForm); setFormAberto(true); }}>Novo usuário</Button>
+      </div>
       <p className="miniText">
         Senha em planilha não é segurança real — é controle de fluxo e rastreabilidade. Guardamos
         só o hash. Não reutilize senha pessoal de nada.
       </p>
-      <section className="panel stack">
+      {status && !formAberto && <p className="warning">{status}</p>}
+      {formAberto && (
+      <Modal titulo={form.usuarioId ? "Editar usuário" : "Novo usuário"} onFechar={fecharForm}>
+      <section className="stack">
         <Input label="Nome" value={form.nome} onChange={(nome) => setForm({ ...form, nome })} />
         <Input label="Login" value={form.login} onChange={(login) => setForm({ ...form, login })} placeholder="daniel" />
         <Input
@@ -2266,9 +2408,7 @@ function SheetUsersScreen({ onNotify }) {
               </button>
             ))}
           </div>
-          {form.perfis.map((perfil) => (
-            <p className="miniText" key={perfil}>{PERFIS[perfil].nome}: {PERFIS[perfil].descricao}</p>
-          ))}
+          <p className="miniText">{form.perfis.map((perfil) => PERFIS[perfil].descricao).join(" ")}</p>
         </section>
         <label className="toggle">
           <input type="checkbox" checked={form.ativo} onChange={(event) => setForm({ ...form, ativo: event.target.checked })} />
@@ -2276,10 +2416,12 @@ function SheetUsersScreen({ onNotify }) {
         </label>
         {status && <p className="warning">{status}</p>}
         <div className="bottomActions inline">
-          {form.usuarioId && <button className="ghostButton" onClick={() => setForm(emptyForm)}>Cancelar</button>}
+          <button className="ghostButton" onClick={fecharForm}>Cancelar</button>
           <Button onClick={salvar} disabled={ocupado}>{form.usuarioId ? "Salvar usuário" : "Cadastrar usuário"}</Button>
         </div>
       </section>
+      </Modal>
+      )}
       {!usuarios.length && <EmptyState title="Nenhum usuário na planilha" text="Crie as abas em Planilha e cadastre o primeiro usuário." />}
       <div className="list">
         {usuarios.map((usuario) => (
@@ -2381,8 +2523,9 @@ function GrupoCalc({ titulo, detalhe, children }) {
   );
 }
 
-// Um item que pode entrar na ordem de produção. Pré-batch anda de galão em
-// galão (5 L); produção anda de litro em litro.
+// Um item que pode entrar na ordem de produção. Tudo anda de litro em litro:
+// a bancada até trabalha em galão de 5 L, mas quem monta a lista pensa no
+// volume, não na embalagem.
 function CardProduzir({ item, litros, onChange }) {
   const passo = item.passo;
   const ajustar = (delta) => onChange(Math.max(0, roundCount(litros + delta)));
@@ -2403,7 +2546,7 @@ function CardProduzir({ item, litros, onChange }) {
         />
         <button type="button" onClick={() => ajustar(passo)} aria-label={`Mais ${passo} litros`}>+</button>
       </div>
-      <span className="produzUnidade">litros{item.tipo === "prebatch" ? ` · galão ${passo} L` : ""}</span>
+      <span className="produzUnidade">litros</span>
     </div>
   );
 }
@@ -2411,9 +2554,11 @@ function CardProduzir({ item, litros, onChange }) {
 // Itens que podem entrar numa ordem de produção: os cinco pré-batches da
 // rotação e as seis produções da casa. Sai da ficha, não de uma lista fixa —
 // acrescentar uma receita acrescenta o card sozinho.
+//
+// O passo é 1 L para todos desde 26/08/2026: a lista é em litro, não em galão.
 function itensProduziveis() {
   return [
-    ...preBatches().map((coquetel) => ({ chave: coquetel.id, nome: coquetel.nome, tipo: "prebatch", passo: 5 })),
+    ...preBatches().map((coquetel) => ({ chave: coquetel.id, nome: coquetel.nome, tipo: "prebatch", passo: 1 })),
     ...PRODUCOES.map((producao) => ({ chave: producao.id, nome: producao.nome, tipo: "producao", passo: 1 })),
   ];
 }
@@ -2742,6 +2887,10 @@ function PreBatchScreen({ onNotify }) {
 // A divergência entre pedido e separado fica registrada, não sobrescrita.
 function RequisicoesScreen({ products, user, onNotify }) {
   const [aba, setAba] = useState("abertas");
+  // Um card aberto por vez; trocar de aba fecha o que estava aberto.
+  const [abertoId, setAbertoId] = useState("");
+  const alternarCard = (id) => setAbertoId((atual) => (atual === id ? "" : id));
+  const trocarAba = (proxima) => { setAba(proxima); setAbertoId(""); };
   const [requisicoes, setRequisicoes] = useState([]);
   const [carregando, setCarregando] = useState(false);
   const [erro, setErro] = useState("");
@@ -2795,11 +2944,11 @@ function RequisicoesScreen({ products, user, onNotify }) {
       </div>
 
       <div className="quickFilters compacto">
-        <button className={aba === "abertas" ? "selected" : ""} onClick={() => setAba("abertas")}>
+        <button className={aba === "abertas" ? "selected" : ""} onClick={() => trocarAba("abertas")}>
           Em aberto {abertas.length ? `(${abertas.length})` : ""}
         </button>
-        <button className={aba === "nova" ? "selected" : ""} onClick={() => setAba("nova")}>Nova</button>
-        <button className={aba === "historico" ? "selected" : ""} onClick={() => setAba("historico")}>Histórico</button>
+        <button className={aba === "nova" ? "selected" : ""} onClick={() => trocarAba("nova")}>Nova</button>
+        <button className={aba === "historico" ? "selected" : ""} onClick={() => trocarAba("historico")}>Histórico</button>
       </div>
 
       {erro && <p className="warning">{erro}</p>}
@@ -2824,6 +2973,8 @@ function RequisicoesScreen({ products, user, onNotify }) {
               key={req.reqId}
               req={req}
               nomeDe={nomeDe}
+              aberto={abertoId === req.reqId}
+              onToggle={() => alternarCard(req.reqId)}
               acao={podeSeparar ? { rotulo: "Separar", onClick: () => setSeparando(req) } : null}
             />
           ))}
@@ -2836,7 +2987,15 @@ function RequisicoesScreen({ products, user, onNotify }) {
       {aba === "historico" && (
         <>
           {!fechadas.length && <EmptyState title="Nenhuma requisição fechada" text="O que já foi separado aparece aqui." />}
-          {fechadas.map((req) => <CardRequisicao key={req.reqId} req={req} nomeDe={nomeDe} />)}
+          {fechadas.map((req) => (
+            <CardRequisicao
+              key={req.reqId}
+              req={req}
+              nomeDe={nomeDe}
+              aberto={abertoId === req.reqId}
+              onToggle={() => alternarCard(req.reqId)}
+            />
+          ))}
         </>
       )}
     </main>
@@ -2845,11 +3004,12 @@ function RequisicoesScreen({ products, user, onNotify }) {
 
 const ICONE_STATUS = { PENDENTE: "⏳", SEPARADO: "✅", PARCIAL: "◐", RECUSADO: "✕" };
 
-function CardRequisicao({ req, nomeDe, acao }) {
-  const [aberto, setAberto] = useState(false);
+// O card nao guarda o proprio aberto: a tela guarda qual esta aberto, e so um
+// fica. Cada card com estado proprio deixava a tela virar uma pilha de listas.
+function CardRequisicao({ req, nomeDe, acao, aberto, onToggle }) {
   return (
     <section className={`bloco ${aberto ? "aberto" : ""}`}>
-      <button type="button" className="blocoHead" onClick={() => setAberto(!aberto)}>
+      <button type="button" className="blocoHead" onClick={onToggle}>
         <span className="blocoIcone" aria-hidden="true">{ICONE_STATUS[req.status] || "•"}</span>
         <strong>{req.destino}</strong>
         <span className="blocoContador">{req.itens.length}</span>
@@ -2891,7 +3051,8 @@ function NovaRequisicao({ products, user, onPronto }) {
   const [destino, setDestino] = useState("BAR22");
   const [busca, setBusca] = useState("");
   const [qtds, setQtds] = useState({});
-  const [abertas, setAbertas] = useState({});
+  // null = ninguém mexeu ainda, e a primeira categoria abre sozinha.
+  const [categoriaAberta, setCategoriaAberta] = useState(null);
   const [erro, setErro] = useState("");
   const [enviando, setEnviando] = useState(false);
 
@@ -2970,14 +3131,15 @@ function NovaRequisicao({ products, user, onPronto }) {
       {!categorias.length && <EmptyState title="Nada encontrado" text="Ajuste o filtro." />}
 
       {categorias.map((grupo, indice) => {
-        // Com filtro ativo tudo abre; sem filtro, só a primeira categoria.
-        const aberta = query ? true : (abertas[grupo.categoria] ?? indice === 0);
+        // Com filtro ativo tudo abre — a busca já reduziu a lista. Sem filtro,
+        // só uma categoria fica aberta: abrir outra fecha a anterior.
+        const aberta = query ? true : (categoriaAberta ?? (indice === 0 ? grupo.categoria : null)) === grupo.categoria;
         return (
           <section className={`bloco ${aberta ? "aberto" : ""}`} key={grupo.categoria}>
             <button
               type="button"
               className="blocoHead"
-              onClick={() => setAbertas((a) => ({ ...a, [grupo.categoria]: !aberta }))}
+              onClick={() => setCategoriaAberta(aberta ? "" : grupo.categoria)}
             >
               <strong>{grupo.categoria}</strong>
               <span className="blocoContador">{grupo.itens.length}</span>

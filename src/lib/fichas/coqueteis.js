@@ -61,6 +61,10 @@ export const COQUETEIS = [
     batch: [
       { insumo: "tanqueray", ml: 50 },
       { insumo: "prod-xarope-acucar", ml: 20 },
+      // Faltava na ficha; Carlos corrigiu em 26/08/2026. Entra no batch, e
+      // por isso a dose sobe de 70 para 73,2 ml — o que muda o rateio de
+      // tudo que o Fitz Gerald puxa.
+      { insumo: "angostura", ml: 3.2, obs: "4 dashes ≈ 3,2 ml" },
     ],
     servico: [{ insumo: "suco-de-limao", ml: 25, obs: "Nunca pré-bater" }],
     metodo: "Batido",

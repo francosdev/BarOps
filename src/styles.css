@@ -1460,6 +1460,19 @@ mark,
     padding-left: 1.5rem;
     padding-right: 1.5rem;
   }
+
+  .list .historyCard {
+    flex-wrap: nowrap;
+  }
+
+  .list .historyCard .rowActions,
+  .list .historyCard .rowActions .ghostButton {
+    width: auto;
+  }
+
+  .list .historyCard .rowActions {
+    flex-wrap: nowrap;
+  }
 }
 
 .status.alert {
@@ -1506,4 +1519,26 @@ mark,
 
 .pedidoResumo {
   border-color: rgba(200, 138, 45, 0.55);
+}
+
+/* Cabeçalho de tela com a ação principal do lado do título: a lista aparece
+   primeiro, e o formulário só quando alguém pede. */
+.screenTopo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.screenTopo h1 {
+  margin: 0;
+}
+
+/* .button nasce com width 100% para o dedo no celular; ao lado do título ele
+   só precisa do tamanho do texto. */
+.screenTopo button {
+  flex: none;
+  width: auto;
 }
