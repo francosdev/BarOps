@@ -1758,3 +1758,97 @@ mark,
   font-weight: 850;
   white-space: nowrap;
 }
+
+/* Dica do clique longo. Só aparece no cartão que tem essa ação, e em cinza:
+   é instrução, não conteúdo. */
+.menuDica {
+  color: #808080;
+  font-size: 0.7rem;
+  font-style: normal;
+  letter-spacing: 0.02em;
+}
+
+/* Segurar não pode virar seleção de texto nem o menu de "copiar" do celular. */
+.menuTile {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+/* --- Sino e painel de avisos -------------------------------------------- */
+
+.sino {
+  position: relative;
+  flex: none;
+}
+
+.sino.urgente .icone {
+  color: var(--brand-red);
+}
+
+.sinoBadge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 20px;
+  padding: 0.05rem 0.3rem;
+  border-radius: 999px;
+  background: var(--brand-red);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.5;
+}
+
+.avisoLista {
+  display: grid;
+  gap: 0.5rem;
+  padding-top: 0.4rem;
+}
+
+/* O aviso inteiro é o botão: ler e ir para o lugar é o mesmo gesto. */
+.avisoCard {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.8rem;
+  border: 1px solid #2a2a2a;
+  border-left-width: 3px;
+  border-radius: 10px;
+  background: #1a1a1a;
+  color: #f5f5f5;
+  text-align: left;
+}
+
+.avisoCard:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.avisoCard.alta {
+  border-left-color: var(--brand-red);
+}
+
+.avisoCard.media {
+  border-left-color: var(--accent-amber);
+}
+
+.avisoCard .icone {
+  width: 22px;
+  height: 22px;
+  margin-top: 0.1rem;
+  color: #8a8a8a;
+}
+
+.avisoCard span {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.avisoCard strong {
+  font-size: 0.95rem;
+}
+
+.avisoCard em {
+  color: #a1a1a1;
+  font-size: 0.83rem;
+  font-style: normal;
+}

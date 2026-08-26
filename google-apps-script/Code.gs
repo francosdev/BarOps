@@ -36,7 +36,7 @@ const CABECALHOS = {
 //
 // As colunas recebedor_id e timestamp_recebimento ficam vazias de proposito:
 // existem para o dia em que a terceira perna for ligada, sem migracao.
-const STATUS_REQUISICAO = ["PENDENTE", "SEPARADO", "PARCIAL", "RECUSADO"];
+const STATUS_REQUISICAO = ["PENDENTE", "SEPARADO", "PARCIAL", "RECUSADO", "CANCELADO"];
 
 // De onde sai o que e requisitado.
 const ORIGEM_REQUISICAO = "GERAL";
@@ -288,6 +288,7 @@ const ROTAS = {
   "requisicoes.criar": rotaRequisicoesCriar,
   "requisicoes.listar": rotaRequisicoesListar,
   "requisicoes.separar": rotaRequisicoesSeparar,
+  "requisicoes.cancelar": rotaRequisicoesCancelar,
 };
 
 // Cria as tres abas e, se PRODUTOS/USUARIOS estiverem vazias, semeia com o
@@ -632,10 +633,73 @@ function rotaRequisicoesListar(payload) {
 
 // Status do cabecalho, derivado das linhas — nao e guardado em lugar nenhum.
 function statusDaRequisicao(itens) {
+  // Cancelada vem antes de tudo: se todas as linhas foram canceladas, a
+  // requisicao esta cancelada, e nao pendente nem recusada.
+  if (itens.every(function (i) { return i.status === "CANCELADO"; })) return "CANCELADO";
   if (itens.some(function (i) { return i.status === "PENDENTE"; })) return "PENDENTE";
   if (itens.every(function (i) { return i.status === "RECUSADO"; })) return "RECUSADO";
   if (itens.some(function (i) { return i.status !== "SEPARADO"; })) return "PARCIAL";
   return "SEPARADO";
+}
+
+/**
+ * Cancela uma requisicao inteira.
+ *
+ * Nao apaga linha nenhuma: a requisicao vira CANCELADO e some das abertas.
+ * Apagar de verdade quebraria o rastro — o mesmo principio de MOVIMENTOS, que
+ * nunca e editado nem apagado.
+ *
+ * So cancela o que ainda esta PENDENTE em todas as linhas. Se qualquer item
+ * ja foi separado, o estoque ja baixou e desfazer isso exige movimento de
+ * volta, nao uma troca de status.
+ */
+function rotaRequisicoesCancelar(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  garantirAba(ss, ABA_REQUISICOES);
+  const reqId = String(payload.reqId || "");
+  if (!reqId) return { ok: false, error: "Informe a requisicao." };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheet = ss.getSheetByName(ABA_REQUISICOES);
+    const todas = lerAba(ss, ABA_REQUISICOES);
+    const alvo = [];
+    todas.forEach(function (linha, i) {
+      if (String(linha.req_id) === reqId) alvo.push({ linha: linha, row: i + 2 });
+    });
+    if (!alvo.length) return { ok: false, error: "Requisicao nao encontrada: " + reqId };
+
+    const jaMexida = alvo.filter(function (a) { return String(a.linha.status) !== "PENDENTE"; });
+    if (jaMexida.length) {
+      return {
+        ok: false,
+        error: "Esta requisicao ja foi separada e nao pode ser cancelada. Registre a devolucao em MOVIMENTOS.",
+      };
+    }
+
+    const agora = new Date().toISOString();
+    const quem = String(payload.usuarioId || "");
+    const motivo = String(payload.motivo || "").trim();
+    const colunas = CABECALHOS.REQUISICOES;
+    const colStatus = colunas.indexOf("status") + 1;
+    const colSeparador = colunas.indexOf("separador_id") + 1;
+    const colTimestamp = colunas.indexOf("timestamp_separacao") + 1;
+    const colObs = colunas.indexOf("obs") + 1;
+
+    alvo.forEach(function (a) {
+      sheet.getRange(a.row, colStatus).setValue("CANCELADO");
+      sheet.getRange(a.row, colSeparador).setValue(quem);
+      sheet.getRange(a.row, colTimestamp).setValue(agora);
+      const anterior = String(a.linha.obs || "").trim();
+      const nota = "Cancelada por " + (quem || "usuario") + (motivo ? " - " + motivo : "");
+      sheet.getRange(a.row, colObs).setValue(anterior ? anterior + " | " + nota : nota);
+    });
+
+    return { ok: true, reqId: reqId, canceladas: alvo.length };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /**

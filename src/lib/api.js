@@ -8,6 +8,9 @@ export const DEFAULT_INTEGRATION = {
   // null significa "ainda não escolhida" e o app pergunta na tela Estoque.
   estoqueAba: "ESTOQUE GERAL",
   estoqueColuna: null,
+  // Quando a planilha foi lida pela última vez. O sino usa para avisar que o
+  // estoque na tela já tem mais de um dia.
+  estoqueSincronizadoEm: null,
 };
 
 // URLs de implantações antigas do Apps Script (substituídas em 05/07/2026);
@@ -154,6 +157,15 @@ export async function listarRequisicoes(filtros = {}) {
 // O estoquista separa e manda. É aqui que o estoque baixa.
 export async function separarRequisicao({ reqId, separadorId, itens }) {
   const resultado = await chamarAppsScript({ action: "requisicoes.separar", reqId, separadorId, itens });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado;
+}
+
+// Cancela a requisição inteira. Não apaga a linha: ela vira CANCELADO e sai
+// das abertas, porque apagar quebraria o rastro de quem pediu o quê. Só vale
+// enquanto nada foi separado — depois disso o estoque já baixou.
+export async function cancelarRequisicao(reqId, usuarioId, motivo = "") {
+  const resultado = await chamarAppsScript({ action: "requisicoes.cancelar", reqId, usuarioId, motivo });
   if (resultado.ok === false) throw new Error(resultado.error);
   return resultado;
 }

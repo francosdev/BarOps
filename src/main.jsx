@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import ephigeniaLogo from "./assets/ephigenia.jpg";
 import {
@@ -6,6 +6,7 @@ import {
   DEFAULT_INTEGRATION,
   bootstrap,
   consultarSaldos,
+  cancelarRequisicao,
   criarRequisicao,
   listarRequisicoes,
   separarRequisicao,
@@ -69,11 +70,17 @@ const PISO_ALERTA_CONTAGEM = 100;
 //
 // Os setores saem liberados para todos os bares porque o pedido não separou
 // quem cobre o quê; dá para restringir por pessoa na tela Usuários.
+// Perfil de líder de bar que pede, mas não separa.
+const PERFIS_LIDER = ["lider_turno", "requisitante"];
+// Quem também dá baixa na requisição — Jon e Yvison, a pedido de Carlos em
+// 26/08/2026. "separar" é o que libera baixar o pedido no estoque.
+const PERFIS_LIDER_ESTOQUE = [...PERFIS_LIDER, "separador"];
+
 const EQUIPE_PADRAO = [
-  ["user-sarah", "Sarah", "1020"],
-  ["user-daniel", "Daniel", "2030"],
-  ["user-yvison", "Yvison", "3040"],
-  ["user-jon", "Jon", "4060"],
+  ["user-sarah", "Sarah", "1020", PERFIS_LIDER],
+  ["user-daniel", "Daniel", "2030", PERFIS_LIDER],
+  ["user-yvison", "Yvison", "3040", PERFIS_LIDER_ESTOQUE],
+  ["user-jon", "Jon", "4060", PERFIS_LIDER_ESTOQUE],
 ];
 
 const DEFAULT_USERS = [
@@ -85,11 +92,11 @@ const DEFAULT_USERS = [
     setores: BARS,
     ativo: true,
   },
-  ...EQUIPE_PADRAO.map(([id, nome, pin]) => ({
+  ...EQUIPE_PADRAO.map(([id, nome, pin, perfis]) => ({
     id,
     nome,
     pin,
-    perfis: ["lider_turno", "requisitante"],
+    perfis,
     setores: BARS,
     ativo: true,
   })),
@@ -482,12 +489,23 @@ function loadUsers() {
   const migrated = users.map((user) => (
     user.id === "user-admin" && user.pin === "1234" ? { ...user, pin: "2708" } : user
   ));
+  // Perfil de fábrica que mudou depois do cadastro alcança quem já tem o
+  // usuário salvo — foi o caso de Jon e Yvison, que ganharam "separador" em
+  // 26/08/2026. Só alcança quem ainda está com o conjunto original: se
+  // alguém mexeu nos perfis daquele usuário, a escolha dele manda.
+  const mesmoConjunto = (a, b) => a.length === b.length && a.every((perfil) => b.includes(perfil));
+  const comPerfilNovo = migrated.map((user) => {
+    const fabrica = DEFAULT_USERS.find((padrao) => padrao.id === user.id);
+    if (!fabrica || mesmoConjunto(user.perfis, fabrica.perfis)) return user;
+    return mesmoConjunto(user.perfis, PERFIS_LIDER) ? { ...user, perfis: fabrica.perfis } : user;
+  });
+
   // Usuário de fábrica que o aparelho ainda não tem entra agora. Só entra o
   // que falta: quem foi inativado continua inativado, porque o registro
   // existe e não é recriado.
-  const existentes = new Set(migrated.map((user) => user.id));
+  const existentes = new Set(comPerfilNovo.map((user) => user.id));
   const faltando = DEFAULT_USERS.filter((user) => !existentes.has(user.id)).map(normalizeUser);
-  return [...faltando, ...migrated];
+  return [...faltando, ...comPerfilNovo];
 }
 
 function loadCurrentUser(users) {
@@ -1171,6 +1189,11 @@ function App() {
   const [integration, setIntegration] = useState(loadIntegration);
   const [selectedInventory, setSelectedInventory] = useState(null);
   const [toast, setToast] = useState("");
+  const [verAvisos, setVerAvisos] = useState(false);
+  // Requisições no App só para o sino saber quantas estão paradas; a tela de
+  // requisição continua carregando as suas. Falha em silêncio: sino sem
+  // número é bem melhor do que app que não abre porque a planilha caiu.
+  const [requisicoes, setRequisicoes] = useState([]);
   const isAdmin = ehAdmin(currentUser);
   const leader = currentUser?.nome || "";
 
@@ -1191,6 +1214,19 @@ function App() {
   // o título nem aparecia. Vale também na primeira renderização, porque o
   // navegador restaura a rolagem depois de um refresh.
   useEffect(() => { window.scrollTo(0, 0); }, [screen]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    listarRequisicoes().then(setRequisicoes).catch(() => setRequisicoes([]));
+  }, [currentUser]);
+
+  const avisos = useMemo(() => montarAvisos({
+    products,
+    requisicoes,
+    draft,
+    isAdmin,
+    sincronizadoEm: integration.estoqueSincronizadoEm || null,
+  }), [products, requisicoes, draft, isAdmin, integration.estoqueSincronizadoEm]);
 
   function notify(message) {
     setToast(message);
@@ -1284,18 +1320,43 @@ function App() {
     return { updated, total: sheetItems.length, naoEncontrados, grade, indice };
   }
 
+  // Apagar rascunho é irreversível e não vai para lugar nenhum: confirma
+  // dizendo o que se perde, com o bar e quantos itens já foram contados.
+  function descartarRascunho() {
+    if (!draft) return;
+    const contados = draft.itens.filter((item) => item.fechamentoContado).length;
+    const ok = window.confirm(
+      `Apagar o rascunho de ${draft.tipo || "contagem"} do bar ${draft.bar}?
+
+` +
+      `${contados} de ${draft.itens.length} itens já foram contados. Isso não pode ser desfeito.`
+    );
+    if (!ok) return;
+    setDraft(null);
+    notify("Rascunho apagado.");
+  }
+
+  // Sair da contagem não pergunta nada: o rascunho é salvo a cada tecla e
+  // continua lá. Perguntar "deseja sair mesmo assim?" a cada vez cobrava um
+  // clique por uma coisa que nunca se perde. Quem quer largar a contagem
+  // segura o cartão do rascunho no menu.
   function openHome() {
-    if (draft && screen === "count") {
-      const ok = window.confirm("Existe uma contagem em andamento. Deseja sair mesmo assim? O rascunho continuará salvo.");
-      if (!ok) return;
-    }
     setScreen("home");
   }
 
   return (
     <div className="app">
       {toast && <div className="toast">{toast}</div>}
-      {screen !== "login" && <Header user={currentUser} onHome={openHome} onLogout={logout} />}
+      {screen !== "login" && (
+        <Header user={currentUser} onHome={openHome} onLogout={logout} avisos={avisos} onAvisos={() => setVerAvisos(true)} />
+      )}
+      {verAvisos && (
+        <PainelAvisos
+          avisos={avisos}
+          onFechar={() => setVerAvisos(false)}
+          onIr={(tela) => setScreen(tela === "count" && !draft ? "home" : tela)}
+        />
+      )}
 
       {screen === "login" && <LoginScreen onLogin={login} />}
       {screen === "home" && (
@@ -1305,6 +1366,7 @@ function App() {
           hasDraft={Boolean(draft)}
           onNew={() => setScreen("new")}
           onResume={() => setScreen("count")}
+          onDescartarRascunho={descartarRascunho}
           onStock={() => setScreen("stock")}
           onProducts={() => setScreen("products")}
           onUsers={() => setScreen("users")}
@@ -1453,6 +1515,7 @@ function App() {
           hasDraft={Boolean(draft)}
           onNew={() => setScreen("new")}
           onResume={() => setScreen("count")}
+          onDescartarRascunho={descartarRascunho}
           onFichas={() => setScreen("fichas")}
           onPreBatch={() => setScreen("prebatch")}
           onRequisicoes={() => setScreen("requisicoes")}
@@ -1462,7 +1525,8 @@ function App() {
   );
 }
 
-function Header({ user, onHome, onLogout }) {
+function Header({ user, onHome, onLogout, avisos, onAvisos }) {
+  const urgentes = avisos.filter((aviso) => aviso.gravidade === "alta").length;
   return (
     <header className="topbar">
       <button className="iconButton" onClick={onHome} aria-label="Início"><Icone nome="casa" /></button>
@@ -1471,6 +1535,15 @@ function Header({ user, onHome, onLogout }) {
         <strong>Ephigenia</strong>
         <span>{user?.nome} · {rotuloPerfis(user?.perfis)}{user?.origem === "local" ? " · reserva" : ""}</span>
       </div>
+      <button
+        className={`iconButton sino ${urgentes ? "urgente" : ""}`.trim()}
+        onClick={onAvisos}
+        aria-label={avisos.length ? `${avisos.length} aviso(s)` : "Sem avisos"}
+        title={avisos.length ? `${avisos.length} aviso(s)` : "Sem avisos"}
+      >
+        <Icone nome="sino" />
+        {avisos.length > 0 && <span className="sinoBadge">{avisos.length}</span>}
+      </button>
       <button className="ghostButton compact" onClick={onLogout}>Sair</button>
     </header>
   );
@@ -1552,6 +1625,7 @@ const ICONES = {
   concluido: <><circle cx="12" cy="12" r="8.5" /><path d="M8.2 12.3l2.6 2.6 5-5.4" /></>,
   parcial: <><circle cx="12" cy="12" r="8.5" /><path d="M12 3.5a8.5 8.5 0 000 17z" /></>,
   recusado: <><circle cx="12" cy="12" r="8.5" /><path d="M9.2 9.2l5.6 5.6M14.8 9.2l-5.6 5.6" /></>,
+  sino: <><path d="M6.5 10a5.5 5.5 0 0111 0c0 4 1.5 5.2 2 5.8H4.5c.5-.6 2-1.8 2-5.8z" /><path d="M10 19a2.2 2.2 0 004 0" /></>,
   remover: <><path d="M5 7h14" /><path d="M10 7V5.5a1 1 0 011-1h2a1 1 0 011 1V7" /><path d="M6.5 7l.8 12a1.5 1.5 0 001.5 1.4h6.4a1.5 1.5 0 001.5-1.4l.8-12" /><path d="M10.5 11v6M13.5 11v6" /></>,
 };
 
@@ -1573,23 +1647,89 @@ function Icone({ nome, className = "" }) {
   );
 }
 
+/**
+ * Clique longo. Devolve os handlers para pôr num botão: o toque curto segue
+ * chamando o onClick normal, e segurar por meio segundo dispara `onSegurar`.
+ *
+ * O clique que vem depois de um toque longo é engolido — senão apagar o
+ * rascunho abriria a contagem que a pessoa acabou de apagar.
+ *
+ * Ponteiro, não mouse+touch separados: um handler só cobre dedo e cursor, e
+ * não dispara duas vezes no celular.
+ */
+function useCliqueLongo(onSegurar, { atraso = 550 } = {}) {
+  const timer = useRef(null);
+  const disparou = useRef(false);
+
+  const limpar = () => {
+    if (timer.current) window.clearTimeout(timer.current);
+    timer.current = null;
+  };
+
+  const iniciar = () => {
+    if (!onSegurar) return;
+    disparou.current = false;
+    limpar();
+    timer.current = window.setTimeout(() => {
+      disparou.current = true;
+      onSegurar();
+    }, atraso);
+  };
+
+  useEffect(() => limpar, []);
+
+  return {
+    onPointerDown: iniciar,
+    onPointerUp: limpar,
+    onPointerLeave: limpar,
+    onPointerCancel: limpar,
+    // Segurar não pode abrir o menu de contexto do celular por cima do nosso.
+    onContextMenu: (evento) => { if (onSegurar) evento.preventDefault(); },
+    engoliuOClique: () => {
+      if (!disparou.current) return false;
+      disparou.current = false;
+      return true;
+    },
+  };
+}
+
 // Um item do menu inicial. É um botão inteiro, não um ícone com legenda: o
 // alvo do dedo é o cartão todo.
-function MenuTile({ icone, rotulo, variante = "", onClick }) {
+function MenuTile({ icone, rotulo, variante = "", onClick, onSegurar, dica }) {
+  const longo = useCliqueLongo(onSegurar);
   return (
-    <button type="button" className={`menuTile ${variante}`.trim()} onClick={onClick}>
+    <button
+      type="button"
+      className={`menuTile ${variante}`.trim()}
+      onClick={() => { if (!longo.engoliuOClique()) onClick(); }}
+      onPointerDown={longo.onPointerDown}
+      onPointerUp={longo.onPointerUp}
+      onPointerLeave={longo.onPointerLeave}
+      onPointerCancel={longo.onPointerCancel}
+      onContextMenu={longo.onContextMenu}
+    >
       <Icone nome={icone} />
       <span>{rotulo}</span>
+      {dica && <em className="menuDica">{dica}</em>}
     </button>
   );
 }
 
-function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onStock, onProducts, onUsers, onIntegration, onSheetUsers, onMovements, onFichas, onPreBatch, onRequisicoes }) {
+function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onDescartarRascunho, onStock, onProducts, onUsers, onIntegration, onSheetUsers, onMovements, onFichas, onPreBatch, onRequisicoes }) {
   // Dois grupos porque são dez portas: o que se usa no turno e o que se
   // ajusta de vez em quando. Quem não é admin só vê o primeiro, e aí o
   // título do grupo não aparece — um grupo só não precisa de nome.
   const operacao = [
-    hasDraft && { icone: "rascunho", rotulo: "Continuar rascunho", variante: "destaque", onClick: onResume },
+    hasDraft && {
+      icone: "rascunho",
+      rotulo: "Continuar rascunho",
+      variante: "destaque",
+      onClick: onResume,
+      // O rascunho continua sendo guardado sozinho; segurar o cartão é a
+      // saída para quem quer largar a contagem em vez de terminá-la.
+      onSegurar: onDescartarRascunho,
+      dica: "segure para apagar",
+    },
     { icone: "inventario", rotulo: "Novo inventário", variante: "principal", onClick: onNew },
     { icone: "requisicao", rotulo: "Requisições", onClick: onRequisicoes },
     { icone: "calculadora", rotulo: "Pré-batch", onClick: onPreBatch },
@@ -2444,6 +2584,116 @@ function IntegrationScreen({ integration, onChange, products, onNotify }) {
   );
 }
 
+/**
+ * Avisos: o que está pedindo atenção agora, calculado do que o app já tem em
+ * mãos. Não é notificação de celular — para o telefone tocar com o app
+ * fechado seria preciso um servidor mandando push, e aqui não há servidor.
+ * Isto é o sino do app: abriu, vê o que está pendurado.
+ *
+ * Cada aviso sabe para onde levar, para o toque no aviso já resolver.
+ */
+const GRAVIDADE = { alta: 2, media: 1 };
+
+function montarAvisos({ products, requisicoes, draft, isAdmin, sincronizadoEm }) {
+  const avisos = [];
+
+  const ativos = products.filter((product) => product.ativo && !CATEGORIAS_PRODUZIDAS.includes(product.categoria));
+  const zerados = ativos.filter((product) => numberValue(product.parStock) > 0 && numberValue(product.estoqueAtual) <= 0);
+  const abaixo = ativos.filter((product) => {
+    const minimo = numberValue(product.parStock);
+    const estoque = numberValue(product.estoqueAtual);
+    return minimo > 0 && estoque > 0 && estoque < minimo;
+  });
+
+  if (zerados.length) {
+    avisos.push({
+      id: "estoque-zerado",
+      gravidade: "alta",
+      icone: "estoque",
+      titulo: `${zerados.length} produto(s) zerado(s)`,
+      texto: zerados.slice(0, 4).map((product) => product.nome).join(", ") + (zerados.length > 4 ? "…" : ""),
+      tela: "stock",
+    });
+  }
+
+  if (abaixo.length) {
+    avisos.push({
+      id: "estoque-baixo",
+      gravidade: "media",
+      icone: "estoque",
+      titulo: `${abaixo.length} produto(s) abaixo do mínimo`,
+      texto: "Dá para gerar o pedido de compra direto da tela de estoque.",
+      tela: "stock",
+    });
+  }
+
+  const pendentes = requisicoes.filter((req) => req.status === "PENDENTE");
+  if (pendentes.length) {
+    avisos.push({
+      id: "requisicoes-pendentes",
+      gravidade: "media",
+      icone: "requisicao",
+      titulo: `${pendentes.length} requisição(ões) esperando separação`,
+      texto: [...new Set(pendentes.map((req) => req.destino))].join(", "),
+      tela: "requisicoes",
+    });
+  }
+
+  if (draft) {
+    const contados = draft.itens.filter((item) => item.fechamentoContado).length;
+    avisos.push({
+      id: "rascunho",
+      gravidade: "media",
+      icone: "rascunho",
+      titulo: `Contagem do bar ${draft.bar} em aberto`,
+      texto: `${contados} de ${draft.itens.length} itens contados.`,
+      tela: "count",
+    });
+  }
+
+  // Estoque velho engana mais do que estoque ausente: quem olha um número de
+  // três dias atrás acha que está olhando hoje.
+  if (isAdmin && sincronizadoEm) {
+    const horas = (Date.now() - sincronizadoEm) / 3600000;
+    if (horas >= 24) {
+      avisos.push({
+        id: "estoque-velho",
+        gravidade: "media",
+        icone: "atualizar",
+        titulo: "Estoque não é atualizado há mais de um dia",
+        texto: `Última leitura da planilha: ${new Date(sincronizadoEm).toLocaleString("pt-BR")}.`,
+        tela: "stock",
+      });
+    }
+  }
+
+  return avisos.sort((a, b) => (GRAVIDADE[b.gravidade] || 0) - (GRAVIDADE[a.gravidade] || 0));
+}
+
+function PainelAvisos({ avisos, onIr, onFechar }) {
+  return (
+    <Modal titulo="Avisos" onFechar={onFechar}>
+      {!avisos.length && <EmptyState title="Nada pendente" text="Nenhum produto abaixo do mínimo e nenhuma requisição parada." />}
+      <div className="avisoLista">
+        {avisos.map((aviso) => (
+          <button
+            key={aviso.id}
+            type="button"
+            className={`avisoCard ${aviso.gravidade}`}
+            onClick={() => { onFechar(); onIr(aviso.tela); }}
+          >
+            <Icone nome={aviso.icone} />
+            <span>
+              <strong>{aviso.titulo}</strong>
+              {aviso.texto && <em>{aviso.texto}</em>}
+            </span>
+          </button>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
 // Produção e pré-batch saem de uma ordem de produção, não de compra: nunca
 // entram num pedido, mesmo tendo mínimo definido (o par).
 const CATEGORIAS_PRODUZIDAS = ["Produção", "Pré-batch"];
@@ -2672,7 +2922,7 @@ function StockScreen({ products, integration, onIntegrationChange, onSync, onNot
       setGrade(resultado.grade);
       setColuna(resultado.indice);
       setNaoEncontrados(resultado.naoEncontrados);
-      onIntegrationChange({ ...integration, estoqueAba: aba, estoqueColuna: resultado.indice });
+      onIntegrationChange({ ...integration, estoqueAba: aba, estoqueColuna: resultado.indice, estoqueSincronizadoEm: Date.now() });
       const nomeColuna = resultado.grade.cabecalhos?.[resultado.indice]?.nome || `coluna ${resultado.indice + 1}`;
       setSyncStatus(
         `${aba} · ${nomeColuna} · ${resultado.updated} produto(s) atualizado(s) de ${resultado.total} linha(s)` +
@@ -3472,6 +3722,30 @@ function RequisicoesScreen({ products, user, onNotify }) {
   const [separando, setSeparando] = useState(null);
 
   const podeSeparar = ehAdmin(user) || podeUsuario(user, "separar");
+  // Cancelar é do dono do pedido ou do admin: quem pediu por engano desfaz
+  // sozinho, sem depender do estoquista.
+  const podeCancelar = (req) => ehAdmin(user) || req.solicitanteId === user?.id;
+  const [cancelando, setCancelando] = useState("");
+
+  async function cancelar(req) {
+    const ok = window.confirm(
+      `Cancelar a requisição para ${req.destino}?
+
+` +
+      `${req.itens.length} item(ns). A requisição sai das abertas e fica registrada como cancelada.`
+    );
+    if (!ok) return;
+    setCancelando(req.reqId);
+    try {
+      await cancelarRequisicao(req.reqId, user?.id || "", "");
+      onNotify("Requisição cancelada.");
+      await carregar();
+    } catch (error) {
+      onNotify(error.message || "Falha ao cancelar a requisição.");
+    } finally {
+      setCancelando("");
+    }
+  }
   const nomePorId = useMemo(() => new Map(products.map((p) => [p.id, p.nome])), [products]);
   const nomeDe = (id) => nomePorId.get(id) || id;
 
@@ -3551,6 +3825,9 @@ function RequisicoesScreen({ products, user, onNotify }) {
               aberto={abertoId === req.reqId}
               onToggle={() => alternarCard(req.reqId)}
               acao={podeSeparar ? { rotulo: "Separar", onClick: () => setSeparando(req) } : null}
+              acaoSecundaria={podeCancelar(req)
+                ? { rotulo: "Cancelar requisição", onClick: () => cancelar(req), ocupado: cancelando === req.reqId }
+                : null}
             />
           ))}
           {!podeSeparar && abertas.length > 0 && (
@@ -3577,11 +3854,11 @@ function RequisicoesScreen({ products, user, onNotify }) {
   );
 }
 
-const ICONE_STATUS = { PENDENTE: "pendente", SEPARADO: "concluido", PARCIAL: "parcial", RECUSADO: "recusado" };
+const ICONE_STATUS = { PENDENTE: "pendente", SEPARADO: "concluido", PARCIAL: "parcial", RECUSADO: "recusado", CANCELADO: "remover" };
 
 // O card nao guarda o proprio aberto: a tela guarda qual esta aberto, e so um
 // fica. Cada card com estado proprio deixava a tela virar uma pilha de listas.
-function CardRequisicao({ req, nomeDe, acao, aberto, onToggle }) {
+function CardRequisicao({ req, nomeDe, acao, acaoSecundaria, aberto, onToggle }) {
   return (
     <section className={`bloco ${aberto ? "aberto" : ""}`}>
       <button type="button" className="blocoHead" onClick={onToggle}>
@@ -3602,9 +3879,14 @@ function CardRequisicao({ req, nomeDe, acao, aberto, onToggle }) {
             </p>
           ))}
           <p className="miniText">{formatDate(req.data)} · {req.status}</p>
-          {acao && (
+          {(acao || acaoSecundaria) && (
             <div className="bottomActions inline">
-              <Button onClick={acao.onClick}>{acao.rotulo}</Button>
+              {acaoSecundaria && (
+                <button className="ghostButton" onClick={acaoSecundaria.onClick} disabled={acaoSecundaria.ocupado}>
+                  {acaoSecundaria.ocupado ? "Cancelando..." : acaoSecundaria.rotulo}
+                </button>
+              )}
+              {acao && <Button onClick={acao.onClick}>{acao.rotulo}</Button>}
             </div>
           )}
         </div>
