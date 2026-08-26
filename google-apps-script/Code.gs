@@ -34,7 +34,7 @@ const CABECALHOS = {
   CHK_ITENS: ["item_id", "template_id", "ordem", "descricao", "tipo_evidencia", "referencia", "obrigatorio", "ativo"],
   CHK_EXECUCOES: ["execucao_id", "template_id", "data", "local", "usuario", "status", "iniciado_em", "concluido_em"],
   CHK_RESPOSTAS: ["resposta_id", "execucao_id", "item_id", "valor", "usuario", "registrado_em"],
-  MURAL: ["aviso_id", "criado_em", "autor", "texto", "para", "status", "resolvido_por", "resolvido_em"],
+  MURAL: ["aviso_id", "criado_em", "autor", "texto", "status", "resolvido_por", "resolvido_em"],
 };
 
 // Fluxo de duas pernas: quem precisa pede, o estoquista separa e manda. A
@@ -1914,13 +1914,13 @@ function chkExpirarAbertas() {
 // --- Mural -----------------------------------------------------------------
 
 /**
- * Mural de recados. Qualquer usuario deixa um aviso; qualquer usuario marca
- * como resolvido.
+ * Quadro de recados da operacao. Qualquer usuario deixa um recado; qualquer
+ * usuario marca como resolvido.
  *
- * Nao e gestor de tarefas: nao tem prazo, nao tem dono obrigatorio e nao
- * entra em relatorio. O escopo da Fase 5 exclui tarefa pontual com prazo e
- * dono de proposito, e o mural nao entra por essa porta — e um quadro de
- * recados, do tamanho de um quadro de recados.
+ * Nao tem destinatario, prazo nem dono, e nao entra em relatorio — Carlos
+ * pediu em 26/08/2026 "apenas um quadro de recado onde todos podem deixar um
+ * recado sobre a operacao", e o escopo da Fase 5 exclui tarefa pontual com
+ * prazo e dono de proposito. Recado e recado.
  */
 function rotaMuralListar(payload) {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
@@ -1931,7 +1931,7 @@ function rotaMuralListar(payload) {
     .map(function (a) {
       return {
         avisoId: textoDe(a.aviso_id), texto: textoDe(a.texto), autor: textoDe(a.autor),
-        para: textoDe(a.para), status: textoDe(a.status) || "ABERTO",
+        status: textoDe(a.status) || "ABERTO",
         criadoEm: textoDe(a.criado_em), resolvidoPor: textoDe(a.resolvido_por), resolvidoEm: textoDe(a.resolvido_em),
       };
     })
@@ -1954,7 +1954,7 @@ function rotaMuralCriar(payload) {
       function (a) { return textoDe(a.aviso_id) === id; },
       {
         aviso_id: id, criado_em: agoraISO(), autor: autor, texto: texto,
-        para: textoDe(payload.para).toLowerCase(), status: "ABERTO", resolvido_por: "", resolvido_em: "",
+        status: "ABERTO", resolvido_por: "", resolvido_em: "",
       });
     return { ok: true, avisoId: id };
   } finally {
@@ -1978,7 +1978,7 @@ function rotaMuralResolver(payload) {
       function (a) { return textoDe(a.aviso_id) === avisoId; },
       {
         aviso_id: avisoId, criado_em: textoDe(aviso.criado_em), autor: textoDe(aviso.autor),
-        texto: textoDe(aviso.texto), para: textoDe(aviso.para),
+        texto: textoDe(aviso.texto),
         status: reabrir ? "ABERTO" : "RESOLVIDO",
         resolvido_por: reabrir ? "" : usuario,
         resolvido_em: reabrir ? "" : agoraISO(),
@@ -1987,6 +1987,60 @@ function rotaMuralResolver(payload) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Rode UMA VEZ no editor do Apps Script, depois de colar o codigo novo.
+ *
+ * Cria as cinco abas da Fase 5 e semeia os seis checklists do escopo, sem
+ * itens — os itens sao cadastrados pela tela de admin do app.
+ *
+ * Existe separada da rota chk_bootstrap porque a rota exige admin autenticado
+ * pela aba USUARIOS, e quem abre o editor do script ja e o dono da planilha.
+ * Rodar de novo nao duplica nada.
+ */
+function criarAbasChecklists() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  [ABA_CHK_TEMPLATES, ABA_CHK_ITENS, ABA_CHK_EXECUCOES, ABA_CHK_RESPOSTAS, ABA_MURAL].forEach(function (aba) {
+    garantirAba(ss, aba);
+  });
+
+  const semente = [
+    ["Pre-operacao Bar 22", "BAR22", "yvison", "PRE_OPERACAO"],
+    ["Pre-operacao Bar 23", "BAR23", "yvison", "PRE_OPERACAO"],
+    ["Contagem Estoque Central", "GERAL", "jon", "FECHAMENTO"],
+    ["Producao e pre-batch", "PRODUCAO", "sarah", "ABERTURA"],
+    ["Reposicao e vidraria", "BAR22", "daniel", "ABERTURA"],
+    ["Double-check geral", "GERAL", "yvison", "FECHAMENTO"],
+  ];
+  const existentes = lerAba(ss, ABA_CHK_TEMPLATES);
+  let criados = 0;
+  semente.forEach(function (linha) {
+    if (existentes.some(function (t) { return normalizeName(t.nome) === normalizeName(linha[0]); })) return;
+    upsertLinha(ss, ABA_CHK_TEMPLATES, function () { return false; }, {
+      template_id: novoId("tpl"), nome: linha[0], local: linha[1], responsavel: linha[2],
+      momento: linha[3], dias_semana: "", ativo: true, criado_em: agoraISO(),
+    });
+    criados += 1;
+  });
+
+  Logger.log("Abas da Fase 5 prontas. Checklists criados agora: " + criados +
+    ". Ja existiam: " + existentes.length + ".");
+  return criados;
+}
+
+/**
+ * Rode UMA VEZ no editor para ligar a expiracao diaria das execucoes.
+ *
+ * Apaga o gatilho anterior da mesma funcao antes de criar, entao rodar de
+ * novo nao acumula gatilhos duplicados disparando varias vezes por dia.
+ */
+function criarGatilhoDeExpiracao() {
+  ScriptApp.getProjectTriggers().forEach(function (gatilho) {
+    if (gatilho.getHandlerFunction() === "chkExpirarAbertas") ScriptApp.deleteTrigger(gatilho);
+  });
+  ScriptApp.newTrigger("chkExpirarAbertas").timeBased().atHour(4).everyDays(1).create();
+  Logger.log("Gatilho diario de expiracao criado para rodar entre 4h e 5h.");
 }
 
 /**

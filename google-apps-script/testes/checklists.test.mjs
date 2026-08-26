@@ -115,7 +115,7 @@ ok("painel do admin lista o dia", g.rotaChkPainel({ usuario: "carlos", data: HOJ
 
 console.log("\n--- mural ---");
 ok("aviso curto demais é recusado", g.rotaMuralCriar({ usuario: "daniel", texto: "oi" }).ok, false);
-const av = g.rotaMuralCriar({ usuario: "daniel", texto: "Faltou copo alto no bar 23", para: "" });
+const av = g.rotaMuralCriar({ usuario: "daniel", texto: "Faltou copo alto no bar 23" });
 ok("qualquer usuário deixa recado", av.ok, true);
 ok("aparece na lista", g.rotaMuralListar({}).avisos.length, 1);
 g.rotaMuralResolver({ aviso_id: av.avisoId, usuario: "jon" });
