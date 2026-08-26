@@ -9,7 +9,6 @@ export const STORAGE_KEYS = {
   products: "barInventory.products",
   inventories: "barInventory.inventories",
   draft: "barInventory.draft",
-  movements: "barInventory.movements",
   // Fase 1: cópia local do catálogo e da sessão vindos da planilha, para o
   // app abrir com os dados na mão mesmo antes de a rede responder.
   catalogo: "barInventory.catalogo",

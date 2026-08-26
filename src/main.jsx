@@ -7,7 +7,6 @@ import {
   bootstrap,
   consultarSaldos,
   criarRequisicao,
-  gravarMovimentos,
   listarRequisicoes,
   separarRequisicao,
   isAppsScriptWebAppUrl,
@@ -19,7 +18,7 @@ import {
   salvarUsuarios,
 } from "./lib/api.js";
 import { entrar, carregarSessao, limparSessao, salvarSessao } from "./lib/auth.js";
-import { explodirAvulso, explodirCascata, resumoDaCascata } from "./lib/fichas/cascata.js";
+import { componentesDoBatch, explodirCascata, explodirLista } from "./lib/fichas/cascata.js";
 import {
   COQUETEIS,
   PRODUCOES,
@@ -50,33 +49,6 @@ const BARS = ["22", "23", "Chivas", "Cozinha", "Estoque"];
 const INVENTORY_TYPES = ["Abertura", "Fechamento", "Inventário geral"];
 const SHIFTS = ["Dia", "Noite"];
 const FRACTIONS = [0, 0.25, 0.3, 0.5, 0.7, 0.75];
-
-const WITHDRAWAL_REASONS = ["Repondo bar", "Produção", "Quebra", "Perda", "Evento", "Consumo Interno", "Outro"];
-
-// O motivo da retirada decide o tipo do movimento e para onde ele vai.
-//
-// Destino vazio significa que a quantidade sai do sistema: quebra e consumo
-// interno não viram estoque em lugar nenhum. Destino null significa que o
-// operador escolhe — é o caso da reposição, que é transferência entre locais
-// e não saída: a garrafa some do GERAL e aparece no bar.
-const MOTIVO_MOVIMENTO = {
-  "Repondo bar": { tipo: "REQUISICAO", destino: null },
-  "Produção": { tipo: "REQUISICAO", destino: "PRODUCAO" },
-  "Quebra": { tipo: "PERDA", destino: "" },
-  "Perda": { tipo: "PERDA", destino: "" },
-  "Evento": { tipo: "EVENTO", destino: "EVENTO" },
-  "Consumo Interno": { tipo: "CONSUMO", destino: "" },
-  "Outro": { tipo: "AJUSTE", destino: "" },
-};
-
-// Para onde se repõe: os pontos de venda. GERAL é de onde sai, PRODUCAO tem
-// motivo próprio e EVENTO também.
-const DESTINOS_REPOSICAO = ["PRINCIPAL", "BAR22", "BAR23", "CHIVAS"];
-
-// Religada em 20/08/2026, agora gravando em MOVIMENTOS. A versão antiga
-// descontava direto do estoqueAtual do produto — um módulo com estoque
-// próprio, que é exatamente o que a Fase 1 veio eliminar.
-const WITHDRAWAL_ENABLED = true;
 
 // Fase 2 do escopo (ligada em 20/08/2026): a contagem continua gravando onde
 // grava hoje e passa a gravar também em MOVIMENTOS. Cada produto contado vira
@@ -1054,7 +1026,6 @@ function App() {
   const [screen, setScreen] = useState(currentUser ? "home" : "login");
   const [products, setProducts] = useState(loadProducts);
   const [inventories, setInventories] = useState(() => loadJson(STORAGE_KEYS.inventories, []).map(migrateInventory));
-  const [movements, setMovements] = useState(() => loadJson(STORAGE_KEYS.movements, []));
   const [draft, setDraft] = useState(() => migrateInventory(loadJson(STORAGE_KEYS.draft, null)));
   const [integration, setIntegration] = useState(loadIntegration);
   const [selectedInventory, setSelectedInventory] = useState(null);
@@ -1070,7 +1041,6 @@ function App() {
   useEffect(() => saveJson(STORAGE_KEYS.products, products), [products]);
   useEffect(() => saveJson(STORAGE_KEYS.integration, integration), [integration]);
   useEffect(() => saveJson(STORAGE_KEYS.inventories, inventories), [inventories]);
-  useEffect(() => saveJson(STORAGE_KEYS.movements, movements), [movements]);
   useEffect(() => {
     if (draft) saveJson(STORAGE_KEYS.draft, draft);
     else localStorage.removeItem(STORAGE_KEYS.draft);
@@ -1111,37 +1081,6 @@ function App() {
     return { updated, total: itens.length };
   }
 
-  // A retirada vira um movimento em MOVIMENTOS; o saldo do local cai por
-  // consequência. Se a planilha não aceitar, a retirada NÃO aconteceu — não
-  // dá para fingir localmente que o estoque baixou.
-  async function registerWithdrawal({ produtoId, quantidade, motivo, observacao, local, destino }) {
-    const product = products.find((item) => item.id === produtoId);
-    if (!product) return { ok: false, error: "Produto não encontrado." };
-    const regra = MOTIVO_MOVIMENTO[motivo] || MOTIVO_MOVIMENTO.Outro;
-    try {
-      await gravarMovimentos([{
-        movId: uid("mov"),
-        tipo: regra.tipo,
-        origem: local,
-        // Motivo com destino fixo ignora o que veio da tela.
-        destino: regra.destino === null ? destino : regra.destino,
-        produtoId,
-        qtd: quantidade,
-        unidade: product.unidade,
-        usuarioId: currentUser?.id || leader,
-        refDocumento: "",
-        obs: [motivo, observacao].filter(Boolean).join(" — "),
-      }]);
-      const alvo = regra.destino === null ? destino : regra.destino;
-      notify(alvo
-        ? `${motivo}: ${quantidade} ${product.unidade} de ${product.nome} — ${local} → ${alvo}`
-        : `${motivo}: ${product.nome} − ${quantidade} ${product.unidade} de ${local}`);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error: error.message || "Falha ao gravar o movimento na planilha." };
-    }
-  }
-
   function openHome() {
     if (draft && screen === "count") {
       const ok = window.confirm("Existe uma contagem em andamento. Deseja sair mesmo assim? O rascunho continuará salvo.");
@@ -1163,22 +1102,16 @@ function App() {
           hasDraft={Boolean(draft)}
           onNew={() => setScreen("new")}
           onResume={() => setScreen("count")}
-          onWithdrawal={() => setScreen("withdrawal")}
           onStock={() => setScreen("stock")}
-          onHistory={() => setScreen("history")}
           onProducts={() => setScreen("products")}
           onUsers={() => setScreen("users")}
           onIntegration={() => setScreen("integration")}
-          onBase={() => setScreen("base")}
           onSheetUsers={() => setScreen("sheetUsers")}
           onMovements={() => setScreen("movements")}
           onFichas={() => setScreen("fichas")}
           onPreBatch={() => setScreen("prebatch")}
           onRequisicoes={() => setScreen("requisicoes")}
         />
-      )}
-      {screen === "withdrawal" && WITHDRAWAL_ENABLED && (
-        <WithdrawalScreen products={products} onConfirm={registerWithdrawal} onBack={openHome} />
       )}
       {screen === "stock" && isAdmin && <StockScreen products={products} onSync={syncStockFromSheet} />}
       {screen === "new" && (
@@ -1272,45 +1205,45 @@ function App() {
                         ? `Enviado. ${resumoEspelho}.`
                         : "Inventário enviado para a planilha"
               );
-              setScreen(isAdmin ? "history" : "home");
+              setScreen(isAdmin ? "movements" : "home");
             } catch (error) {
               notify(error.message || "Falha ao enviar para a planilha.");
             }
           }}
         />
       )}
-      {screen === "history" && isAdmin && (
-        <HistoryScreen
+      {screen === "details" && isAdmin && selectedInventory && (
+        <InventoryDetailsScreen inventory={selectedInventory} products={products} onBack={() => setScreen("movements")} onNotify={notify} />
+      )}
+      {screen === "products" && isAdmin && <ProductsScreen products={products} onChange={setProducts} />}
+      {screen === "users" && isAdmin && <UsersScreen users={users} onChange={setUsers} currentUserId={currentUser.id} />}
+      {screen === "sheetUsers" && isAdmin && <SheetUsersScreen onNotify={notify} />}
+      {/* Movimentos e histórico são a mesma tela: saldo, lançamento e contagem
+          contam a mesma história em três recortes. */}
+      {screen === "movements" && isAdmin && (
+        <MovementsScreen
+          products={products}
           inventories={inventories}
-          movements={movements}
           onDetails={(inventory) => {
             setSelectedInventory(inventory);
             setScreen("details");
           }}
+          onNotify={notify}
         />
       )}
-      {screen === "details" && isAdmin && selectedInventory && (
-        <InventoryDetailsScreen inventory={selectedInventory} products={products} onBack={() => setScreen("history")} onNotify={notify} />
-      )}
-      {screen === "products" && isAdmin && <ProductsScreen products={products} onChange={setProducts} />}
-      {screen === "users" && isAdmin && <UsersScreen users={users} onChange={setUsers} currentUserId={currentUser.id} />}
-      {screen === "base" && isAdmin && <BaseScreen products={products} onNotify={notify} />}
-      {screen === "sheetUsers" && isAdmin && <SheetUsersScreen onNotify={notify} />}
-      {screen === "movements" && isAdmin && <MovementsScreen products={products} onNotify={notify} />}
       {/* Ficha técnica é consulta liberada para todos os perfis. */}
       {screen === "fichas" && <FichasScreen />}
       {screen === "prebatch" && <PreBatchScreen onNotify={notify} />}
       {/* Requisição é liberada para qualquer usuário logado; separar exige perfil. */}
       {screen === "requisicoes" && <RequisicoesScreen products={products} user={currentUser} onNotify={notify} />}
-      {screen === "integration" && isAdmin && <IntegrationScreen integration={integration} onChange={setIntegration} />}
-      {["history", "details", "products", "users", "integration", "stock", "base", "sheetUsers", "movements"].includes(screen) && !isAdmin && (
+      {screen === "integration" && isAdmin && <IntegrationScreen integration={integration} onChange={setIntegration} products={products} onNotify={notify} />}
+      {["details", "products", "users", "integration", "stock", "sheetUsers", "movements"].includes(screen) && !isAdmin && (
         <HomeScreen
           user={currentUser}
           isAdmin={false}
           hasDraft={Boolean(draft)}
           onNew={() => setScreen("new")}
           onResume={() => setScreen("count")}
-          onWithdrawal={() => setScreen("withdrawal")}
           onFichas={() => setScreen("fichas")}
           onPreBatch={() => setScreen("prebatch")}
           onRequisicoes={() => setScreen("requisicoes")}
@@ -1378,12 +1311,12 @@ function LoginScreen({ onLogin }) {
   );
 }
 
-function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, onStock, onHistory, onProducts, onUsers, onIntegration, onBase, onSheetUsers, onMovements, onFichas, onPreBatch, onRequisicoes }) {
+function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onStock, onProducts, onUsers, onIntegration, onSheetUsers, onMovements, onFichas, onPreBatch, onRequisicoes }) {
   return (
     <main className="screen">
       <p className="eyebrow">Olá, {user?.nome}.</p>
       <h1>{isAdmin ? "Painel do admin" : "O que vamos contar hoje?"}</h1>
-      {!isAdmin && <p className="roleNotice">{rotuloPerfis(user?.perfis)}: acesso liberado para {WITHDRAWAL_ENABLED ? "contagens e retiradas de estoque" : "contagens"}.</p>}
+      {!isAdmin && <p className="roleNotice">{rotuloPerfis(user?.perfis)}: acesso liberado para contagens e requisições.</p>}
       <div className="actionGrid">
         {hasDraft && <Button onClick={onResume} variant="amber">Continuar rascunho</Button>}
         <Button onClick={onNew}>Novo inventário</Button>
@@ -1391,14 +1324,12 @@ function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onWithdrawal, on
         <Button onClick={onFichas} variant="secondary">Fichas técnicas</Button>
         <Button onClick={onRequisicoes} variant="secondary">Requisições</Button>
         <Button onClick={onPreBatch} variant="secondary">Calculadora de pré-batch</Button>
-        {WITHDRAWAL_ENABLED && <Button onClick={onWithdrawal} variant="secondary">Retirada de estoque</Button>}
         {isAdmin && <Button onClick={onStock} variant="secondary">Estoque atual</Button>}
+        {/* Uma porta só para saldo, lançamento e contagem enviada. */}
         {isAdmin && <Button onClick={onMovements} variant="secondary">Movimentos</Button>}
-        {isAdmin && <Button onClick={onHistory} variant="secondary">Histórico</Button>}
         {isAdmin && <Button onClick={onProducts} variant="secondary">Produtos</Button>}
         {isAdmin && <Button onClick={onUsers} variant="secondary">Usuários (reserva)</Button>}
         {isAdmin && <Button onClick={onSheetUsers} variant="secondary">Usuários da planilha</Button>}
-        {isAdmin && <Button onClick={onBase} variant="secondary">Base da planilha</Button>}
         {isAdmin && <Button onClick={onIntegration} variant="secondary">Planilha</Button>}
       </div>
     </main>
@@ -1616,79 +1547,6 @@ function ReviewScreen({ inventory, onBack, onSend }) {
         <button className="ghostButton" onClick={onBack}>Voltar e editar</button>
         <Button onClick={onSend}>Enviar inventário</Button>
       </div>
-    </main>
-  );
-}
-
-function HistoryScreen({ inventories, movements, onDetails }) {
-  const [tab, setTab] = useState("inventarios");
-  const [filters, setFilters] = useState({ bar: "", tipo: "", data: "", produto: "" });
-  const productQuery = filters.produto.trim().toLowerCase();
-  const matchesProduct = (name) => !productQuery || String(name || "").toLowerCase().includes(productQuery);
-
-  const filteredInventories = inventories.filter((inventory) => (
-    (!filters.bar || inventory.bar === filters.bar) &&
-    (!filters.tipo || inventory.tipo === filters.tipo) &&
-    (!filters.data || inventory.data === filters.data) &&
-    (!productQuery || inventory.itens.some((item) => matchesProduct(item.nome) && (item.fechamentoContado || numberValue(item.quantidade) > 0)))
-  ));
-
-  const filteredMovements = movements.filter((movement) => (
-    matchesProduct(movement.produto) &&
-    (!filters.data || String(movement.dataHora || "").slice(0, 10) === filters.data)
-  ));
-
-  return (
-    <main className="screen">
-      <h1>Histórico</h1>
-      <div className="quickFilters">
-        <button className={tab === "inventarios" ? "selected" : ""} onClick={() => setTab("inventarios")}>Inventários</button>
-        <button className={tab === "movimentacoes" ? "selected" : ""} onClick={() => setTab("movimentacoes")}>Movimentações</button>
-      </div>
-      <div className="filterGrid">
-        <Input label="Produto" value={filters.produto} onChange={(produto) => setFilters({ ...filters, produto })} placeholder="Buscar por nome" />
-        <Input label="Data" type="date" value={filters.data} onChange={(data) => setFilters({ ...filters, data })} />
-        {tab === "inventarios" && <Select label="Bar" value={filters.bar} onChange={(bar) => setFilters({ ...filters, bar })} options={["", ...BARS]} />}
-        {tab === "inventarios" && <Select label="Tipo" value={filters.tipo} onChange={(tipo) => setFilters({ ...filters, tipo })} options={["", ...INVENTORY_TYPES]} />}
-      </div>
-      {tab === "inventarios" && (
-        <>
-          {!filteredInventories.length && <EmptyState title="Nenhum inventário encontrado" text="Os envios finalizados aparecem aqui." />}
-          <div className="list">
-            {filteredInventories.map((inventory) => (
-              <article className="historyCard" key={inventory.id}>
-                <div>
-                  <h3>{formatDate(inventory.data)} · Bar {inventory.bar}</h3>
-                  <p>{inventory.tipo} · {inventory.turno} · {inventory.lider}</p>
-                  {productQuery && inventory.itens.filter((item) => matchesProduct(item.nome)).slice(0, 3).map((item) => (
-                    <p key={item.produtoId}>{item.nome}: {numberValue(item.quantidade)}</p>
-                  ))}
-                  <span className="status">Enviado</span>
-                </div>
-                <button className="ghostButton compact" onClick={() => onDetails(inventory)}>Ver detalhes</button>
-              </article>
-            ))}
-          </div>
-        </>
-      )}
-      {tab === "movimentacoes" && (
-        <>
-          {!filteredMovements.length && <EmptyState title="Nenhuma movimentação" text="As retiradas de estoque aparecem aqui." />}
-          <div className="list">
-            {filteredMovements.map((movement) => (
-              <article className="historyCard" key={movement.id}>
-                <div>
-                  <h3>{movement.produto}</h3>
-                  <p>Retirada de {movement.quantidade} {movement.unidade} · {movement.motivo}</p>
-                  <p>{new Date(movement.dataHora).toLocaleString("pt-BR")} · {movement.usuario}</p>
-                  {movement.observacao && <p>{movement.observacao}</p>}
-                  <span className="status warn">Retirada</span>
-                </div>
-              </article>
-            ))}
-          </div>
-        </>
-      )}
     </main>
   );
 }
@@ -1965,9 +1823,48 @@ function UsersScreen({ users, onChange, currentUserId }) {
   );
 }
 
-function IntegrationScreen({ integration, onChange }) {
+// A tela "Base da planilha" saiu em 26/08/2026: era um painel inteiro para
+// três botões de manutenção que se usa uma vez por planilha. Eles vivem aqui,
+// junto da URL que os faz funcionar — a listagem do catálogo não voltou,
+// porque quem quer ver o catálogo abre a aba PRODUTOS.
+function IntegrationScreen({ integration, onChange, products, onNotify }) {
   const [form, setForm] = useState({ appsScriptUrl: integration.appsScriptUrl || "" });
   const [status, setStatus] = useState("");
+  const [baseStatus, setBaseStatus] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+
+  async function manutencao(tarefa, rotulo) {
+    setOcupado(true);
+    setBaseStatus(`${rotulo}...`);
+    try {
+      const mensagem = await tarefa();
+      setBaseStatus(mensagem);
+      onNotify(mensagem);
+    } catch (error) {
+      const mensagem = error.message || `Falha em ${rotulo.toLowerCase()}.`;
+      setBaseStatus(mensagem);
+      onNotify(mensagem);
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  const ativos = () => products.filter((product) => product.ativo).map(paraCatalogo);
+
+  function criarAbas() {
+    return manutencao(async () => {
+      const resultado = await bootstrap({ produtos: ativos() });
+      return `Abas prontas. ${resultado.produtosCriados} produtos e ${resultado.usuariosCriados} usuário(s) semeados. MOVIMENTOS tem ${resultado.movimentosExistentes} linha(s).`;
+    }, "Criando as abas");
+  }
+
+  function enviarCatalogo() {
+    return manutencao(async () => {
+      const resultado = await salvarCatalogo(ativos());
+      const catalogo = await listarCatalogo();
+      return `Catálogo enviado: ${resultado.criados} criados, ${resultado.atualizados} atualizados. A aba PRODUTOS tem ${catalogo.length} linha(s).`;
+    }, "Enviando o catálogo");
+  }
 
   function save() {
     onChange({ appsScriptUrl: form.appsScriptUrl.trim() });
@@ -2031,137 +1928,17 @@ function IntegrationScreen({ integration, onChange }) {
           <Button onClick={save}>Salvar</Button>
         </div>
       </section>
-    </main>
-  );
-}
-
-function WithdrawalScreen({ products, onConfirm, onBack }) {
-  const [search, setSearch] = useState("");
-  const [selectedId, setSelectedId] = useState("");
-  const [quantidade, setQuantidade] = useState(0);
-  const [motivo, setMotivo] = useState("");
-  const [local, setLocal] = useState("GERAL");
-  const [destino, setDestino] = useState("PRINCIPAL");
-  const [observacao, setObservacao] = useState("");
-  const [error, setError] = useState("");
-  const [gravando, setGravando] = useState(false);
-  const query = search.trim().toLowerCase();
-  const available = products.filter((product) => product.ativo);
-  const matches = query
-    ? available.filter((product) => product.nome.toLowerCase().includes(query)).slice(0, 8)
-    : [];
-  const selected = available.find((product) => product.id === selectedId);
-
-  async function confirm() {
-    if (!selected) {
-      setError("Selecione o produto.");
-      return;
-    }
-    const amount = roundCount(quantidade);
-    if (amount <= 0) {
-      setError("Informe uma quantidade maior que zero.");
-      return;
-    }
-    if (!motivo) {
-      setError("Selecione o motivo da retirada.");
-      return;
-    }
-    if (!local) {
-      setError("Selecione de qual local a retirada sai.");
-      return;
-    }
-    const pedeDestino = MOTIVO_MOVIMENTO[motivo]?.destino === null;
-    if (pedeDestino && !destino) {
-      setError("Selecione para qual bar vai a reposição.");
-      return;
-    }
-    if (pedeDestino && destino === local) {
-      setError("Origem e destino são o mesmo local. A reposição não move nada.");
-      return;
-    }
-    // Referência do último saldo conhecido no aparelho. O saldo de verdade
-    // é a soma de MOVIMENTOS; isto aqui só evita um erro de digitação óbvio.
-    const referencia = numberValue(selected.estoqueAtual);
-    if (referencia && amount > referencia) {
-      const ok = window.confirm(`O último saldo conhecido de ${selected.nome} é ${referencia} ${selected.unidade}. Retirar ${amount} deixa o saldo negativo. Confirmar mesmo assim?`);
-      if (!ok) return;
-    }
-    setError("");
-    setGravando(true);
-    const resultado = await onConfirm({
-      produtoId: selected.id,
-      quantidade: amount,
-      motivo,
-      local,
-      destino,
-      observacao: observacao.trim(),
-    });
-    setGravando(false);
-    if (!resultado?.ok) {
-      setError(resultado?.error || "Não foi possível gravar. A retirada não foi registrada.");
-      return;
-    }
-    setSelectedId("");
-    setSearch("");
-    setQuantidade(0);
-    setMotivo("");
-    setObservacao("");
-  }
-
-  return (
-    <main className="screen">
-      <h1>Retirada de estoque</h1>
       <section className="panel stack">
-        {!selected && (
-          <>
-            <Input label="Produto" value={search} onChange={setSearch} placeholder="Digite para buscar" autoFocus />
-            {query && !matches.length && <p className="miniText">Nenhum produto encontrado.</p>}
-            <div className="list">
-              {matches.map((product) => (
-                <article className="historyCard" key={product.id}>
-                  <div>
-                    <h3>{product.nome}</h3>
-                    <p>{getOperationalCategory(product)} · Estoque: {numberValue(product.estoqueAtual)} {product.unidade}</p>
-                  </div>
-                  <button className="ghostButton compact" onClick={() => { setSelectedId(product.id); setError(""); }}>Selecionar</button>
-                </article>
-              ))}
-            </div>
-          </>
-        )}
-        {selected && (
-          <>
-            <div className="sourceBanner">
-              <strong>{selected.nome}</strong>
-              <span>Estoque atual: {numberValue(selected.estoqueAtual)} {selected.unidade}</span>
-            </div>
-            <button className="ghostButton compact" onClick={() => setSelectedId("")}>Trocar produto</button>
-            <NumberField label={`Quantidade retirada (${selected.unidade})`} value={quantidade} onChange={setQuantidade} />
-            <Select label="Sai de qual local" value={local} onChange={setLocal} options={CODIGOS_LOCAIS} />
-            <Picker label="Motivo" options={WITHDRAWAL_REASONS} value={motivo} onChange={setMotivo} />
-            {MOTIVO_MOVIMENTO[motivo]?.destino === null && (
-              <Select label="Repondo qual bar" value={destino} onChange={setDestino} options={DESTINOS_REPOSICAO} />
-            )}
-            {motivo && (
-              <p className="miniText">
-                Grava como <strong>{MOTIVO_MOVIMENTO[motivo].tipo}</strong>
-                {MOTIVO_MOVIMENTO[motivo].destino === null
-                  ? ` — transfere de ${local} para ${destino}. Sai do saldo de um e entra no do outro.`
-                  : MOTIVO_MOVIMENTO[motivo].destino
-                    ? ` — sai de ${local} e entra em ${MOTIVO_MOVIMENTO[motivo].destino}.`
-                    : ` — sai de ${local} e deixa o sistema.`}
-              </p>
-            )}
-            <Input label="Observações" value={observacao} onChange={setObservacao} placeholder="Opcional" />
-          </>
-        )}
-        {error && <p className="error">{error}</p>}
+        <p className="label">Manutenção da base</p>
+        <p className="miniText">
+          Uma vez por planilha. Nenhum módulo tem estoque próprio: todos escrevem em MOVIMENTOS,
+          e o saldo de um produto em um local é a soma dos movimentos daquele produto naquele local.
+        </p>
         <div className="bottomActions inline">
-          <button className="ghostButton" onClick={onBack}>Voltar</button>
-          <Button onClick={confirm} disabled={!selected || gravando}>
-            {gravando ? "Gravando..." : "Confirmar retirada"}
-          </Button>
+          <button className="ghostButton" onClick={criarAbas} disabled={ocupado}>Criar abas</button>
+          <button className="ghostButton" onClick={enviarCatalogo} disabled={ocupado}>Enviar catálogo</button>
         </div>
+        {baseStatus && <p className="miniText">{baseStatus}</p>}
       </section>
     </main>
   );
@@ -2303,100 +2080,6 @@ function paraCatalogo(product) {
 // Tela da Fase 1: cria as abas PRODUTOS/USUARIOS/MOVIMENTOS na planilha e
 // mantém o catálogo único sincronizado. É a base que requisição, produção e
 // pedido de compra vão consumir depois.
-function BaseScreen({ products, onNotify }) {
-  const [catalogo, setCatalogo] = useState([]);
-  const [status, setStatus] = useState("");
-  const [ocupado, setOcupado] = useState(false);
-
-  async function executar(tarefa, rotulo) {
-    setOcupado(true);
-    setStatus(`${rotulo}...`);
-    try {
-      const mensagem = await tarefa();
-      setStatus(mensagem);
-      onNotify(mensagem);
-    } catch (error) {
-      const mensagem = error.message || `Falha em ${rotulo.toLowerCase()}.`;
-      setStatus(mensagem);
-      onNotify(mensagem);
-    } finally {
-      setOcupado(false);
-    }
-  }
-
-  function criarAbas() {
-    return executar(async () => {
-      const resultado = await bootstrap({ produtos: products.filter((p) => p.ativo).map(paraCatalogo) });
-      return `Abas prontas. ${resultado.produtosCriados} produtos e ${resultado.usuariosCriados} usuário(s) semeados. MOVIMENTOS tem ${resultado.movimentosExistentes} linha(s).`;
-    }, "Criando as abas");
-  }
-
-  function carregar() {
-    return executar(async () => {
-      const produtos = await listarCatalogo();
-      setCatalogo(produtos);
-      return `${produtos.length} produtos lidos da aba PRODUTOS.`;
-    }, "Lendo o catálogo");
-  }
-
-  function enviar() {
-    return executar(async () => {
-      const resultado = await salvarCatalogo(products.filter((p) => p.ativo).map(paraCatalogo));
-      const produtos = await listarCatalogo();
-      setCatalogo(produtos);
-      return `Catálogo enviado: ${resultado.criados} criados, ${resultado.atualizados} atualizados.`;
-    }, "Enviando o catálogo");
-  }
-
-  const requisitaveis = catalogo.filter((produto) => produto.requisitavel).length;
-  const semMinimo = catalogo.filter((produto) => produto.minimo === null).length;
-
-  return (
-    <main className="screen">
-      <h1>Base da planilha</h1>
-      <p className="miniText">
-        Nenhum módulo tem estoque próprio: todos escrevem em MOVIMENTOS, e o saldo de um produto
-        em um local é a soma dos movimentos daquele produto naquele local.
-      </p>
-      <section className="panel stack">
-        <div className="bottomActions inline">
-          <Button onClick={criarAbas} disabled={ocupado}>Criar abas</Button>
-          <button className="ghostButton" onClick={carregar} disabled={ocupado}>Ler catálogo</button>
-          <button className="ghostButton" onClick={enviar} disabled={ocupado}>Enviar catálogo</button>
-        </div>
-        {status && <p className="miniText">{status}</p>}
-      </section>
-      {catalogo.length > 0 && (
-        <>
-          <div className="summaryGrid">
-            <Metric label="Produtos" value={catalogo.length} />
-            <Metric label="Requisitáveis" value={requisitaveis} />
-            <Metric label="Sem mínimo" value={semMinimo} />
-          </div>
-          <div className="list">
-            {catalogo.map((produto) => (
-              <article className={`historyCard ${!produto.ativo ? "inactive" : ""}`} key={produto.produtoId}>
-                <div>
-                  <h3>{produto.nome}</h3>
-                  <p>{produto.categoria} · {produto.unidade} · {produto.fatorPack} un/{produto.packNome}</p>
-                  <p>
-                    Mínimo {produto.minimo === null ? "—" : produto.minimo}
-                    {produto.fornecedores.length ? ` · ${produto.fornecedores.join(", ")}` : ""}
-                  </p>
-                  <span className="status">{produto.requisitavel ? "Requisitável" : "Uso interno"}</span>
-                  {produto.produzido && <span className="status warn">Produzido</span>}
-                </div>
-              </article>
-            ))}
-          </div>
-        </>
-      )}
-    </main>
-  );
-}
-
-// Usuários da planilha: são estes que valem em todos os aparelhos. Os
-// usuários locais da tela "Usuários" continuam existindo só como reserva.
 function SheetUsersScreen({ onNotify }) {
   const emptyForm = { usuarioId: "", nome: "", login: "", senha: "", perfis: ["consulta"], ativo: true };
   const [usuarios, setUsuarios] = useState([]);
@@ -2503,7 +2186,7 @@ function SheetUsersScreen({ onNotify }) {
           <Button onClick={salvar} disabled={ocupado}>{form.usuarioId ? "Salvar usuário" : "Cadastrar usuário"}</Button>
         </div>
       </section>
-      {!usuarios.length && <EmptyState title="Nenhum usuário na planilha" text="Crie as abas em Base da planilha e cadastre o primeiro usuário." />}
+      {!usuarios.length && <EmptyState title="Nenhum usuário na planilha" text="Crie as abas em Planilha e cadastre o primeiro usuário." />}
       <div className="list">
         {usuarios.map((usuario) => (
           <article className={`historyCard ${!usuario.ativo ? "inactive" : ""}`} key={usuario.usuarioId}>
@@ -2568,29 +2251,162 @@ function LinhaCalc({ nome, valor, detalhe }) {
   );
 }
 
+// Grupo de linhas dentro de um bloco: o batch no título, o que entra nele
+// logo abaixo. É como a bancada lê — primeiro o galão, depois o que vai nele.
+function GrupoCalc({ titulo, detalhe, children }) {
+  return (
+    <div className="grupoCalc">
+      <p className="grupoTitulo">
+        <span>{titulo}</span>
+        <strong>{detalhe}</strong>
+      </p>
+      {children}
+    </div>
+  );
+}
+
+// Um item que pode entrar na ordem de produção. Pré-batch anda de galão em
+// galão (5 L); produção anda de litro em litro.
+function CardProduzir({ item, litros, onChange }) {
+  const passo = item.passo;
+  const ajustar = (delta) => onChange(Math.max(0, roundCount(litros + delta)));
+  return (
+    <div className={`produzCard ${litros > 0 ? "ativo" : ""}`}>
+      <p className="produzTag">{item.tipo === "prebatch" ? "Pré-batch" : "Produção"}</p>
+      <h4>{item.nome}</h4>
+      <div className="produzStepper">
+        <button type="button" onClick={() => ajustar(-passo)} disabled={!litros} aria-label={`Menos ${passo} litros`}>−</button>
+        <input
+          type="number"
+          min="0"
+          step={passo}
+          inputMode="decimal"
+          value={litros || ""}
+          placeholder="0"
+          onChange={(event) => onChange(Math.max(0, numberValue(event.target.value)))}
+        />
+        <button type="button" onClick={() => ajustar(passo)} aria-label={`Mais ${passo} litros`}>+</button>
+      </div>
+      <span className="produzUnidade">litros{item.tipo === "prebatch" ? ` · galão ${passo} L` : ""}</span>
+    </div>
+  );
+}
+
+// Itens que podem entrar numa ordem de produção: os cinco pré-batches da
+// rotação e as seis produções da casa. Sai da ficha, não de uma lista fixa —
+// acrescentar uma receita acrescenta o card sozinho.
+function itensProduziveis() {
+  return [
+    ...preBatches().map((coquetel) => ({ chave: coquetel.id, nome: coquetel.nome, tipo: "prebatch", passo: 5 })),
+    ...PRODUCOES.map((producao) => ({ chave: producao.id, nome: producao.nome, tipo: "producao", passo: 1 })),
+  ];
+}
+
+// Checklist de produção em PDF: uma caixa para marcar por linha, na ordem em
+// que a bancada trabalha — o que produzir, o que vai em cada galão, que bases
+// fazer antes, o que subir do estoque e o que pesar.
+async function exportarChecklistProducao(plano, titulo) {
+  const { jsPDF } = await import("jspdf");
+  const autoTable = (await import("jspdf-autotable")).default;
+  const doc = new jsPDF();
+  const agora = new Date();
+
+  doc.setFontSize(15);
+  doc.text("Checklist de produção", 14, 16);
+  doc.setFontSize(10);
+  doc.text(`${titulo} · ${agora.toLocaleString("pt-BR")}`, 14, 22);
+
+  let cursor = 28;
+  function secao(nome, cabecalho, linhas) {
+    if (!linhas.length) return;
+    if (cursor > 250) {
+      doc.addPage();
+      cursor = 20;
+    }
+    doc.setFontSize(11);
+    doc.text(nome, 14, cursor);
+    autoTable(doc, {
+      startY: cursor + 3,
+      head: [["", ...cabecalho]],
+      body: linhas.map((linha) => ["", ...linha]),
+      styles: { fontSize: 9, cellPadding: 2.2 },
+      headStyles: { fillColor: [154, 1, 29] },
+      columnStyles: { 0: { cellWidth: 9 } },
+      // A caixa é desenhada, não escrita: quadrado vazio sai igual em
+      // qualquer fonte, e as fontes padrão do jsPDF não têm ☐.
+      didDrawCell: (data) => {
+        if (data.section !== "body" || data.column.index !== 0) return;
+        doc.setDrawColor(110);
+        doc.setLineWidth(0.3);
+        doc.rect(data.cell.x + 2.5, data.cell.y + (data.cell.height - 4) / 2, 4, 4);
+      },
+    });
+    cursor = doc.lastAutoTable.finalY + 9;
+  }
+
+  // As seções saem na ordem da bancada: primeiro o que se separa e se pesa,
+  // depois as bases, e só então a montagem dos galões.
+  secao("O que vai sair daqui", ["Pré-batch", "Quantidade", "Validade"], plano.galoes.map((lote) => [
+    lote.nome,
+    `${emLitros(lote.ml)} L`,
+    `${validadeDias(lote.chave)} dias`,
+  ]));
+
+  secao("Separar do estoque", ["Item", "Unidades", "Equivale a"], plano.separacao.map((item) => [
+    item.nome,
+    `${item.unidades} ${item.unidadeEstoque}`,
+    quantidadeLegivel(item.qtdReceita, item.unidadeReceita),
+  ]));
+
+  secao("Pesar e medir", ["Insumo", "Quantidade", "Embalagem"], plano.insumosBase.map((item) => [
+    item.nome,
+    quantidadeLegivel(item.qtdReceita, item.unidadeReceita),
+    item.embalagemFechada ? `${item.unidades} ${item.unidadeEstoque}` : "granel",
+  ]));
+
+  secao("Produções, nesta ordem", ["Produção", "Quantidade", "Validade"], plano.producoes.map((lote) => [
+    lote.nome,
+    `${emLitros(lote.produzir)} L`,
+    `${validadeDias(lote.chave)} dias`,
+  ]));
+
+  secao("Montagem dos galões", ["Pré-batch", "Componente", "Quantidade"], plano.galoes.flatMap((lote) => (
+    lote.componentes.map((componente) => [lote.nome, componente.nome, quantidadeLegivel(componente.ml, "ml")])
+  )));
+
+  doc.save(`checklist-producao-${agora.toISOString().slice(0, 10)}.pdf`);
+}
+
 // Calculadora de pré-batch. Dois modos:
 //
 //   Sugestão — compara o saldo em PRODUCAO com o par de cada pré-batch e
-//              explode a cascata. É o cálculo automático, inalterado.
-//   Avulso   — "quero fazer N litros deste aqui": conta de receita pura,
-//              sem saldo e sem par, para quem já decidiu o volume.
+//              explode a cascata. É o cálculo automático.
+//   Lista    — "quero fazer isto, nestes volumes": a pessoa escolhe os itens
+//              e as quantidades, e a cascata resolve o resto do zero.
+//
+// O modo Lista substituiu o cálculo avulso de 20/08/2026: uma lista de um
+// item só é exatamente o que o avulso fazia, e a de vários resolve a ordem de
+// produção inteira de uma vez.
+//
+// Os dois modos terminam no mesmo `plano`, que é o que a tela desenha e o que
+// vira PDF — o checklist não é um segundo cálculo.
 function PreBatchScreen({ onNotify }) {
   const [modo, setModo] = useState("sugestao");
   const [arredondamento, setArredondamento] = useState("litro");
   const [saldos, setSaldos] = useState(null);
   const [carregando, setCarregando] = useState(false);
   const [erro, setErro] = useState("");
-  const [avulsoId, setAvulsoId] = useState(preBatches()[0]?.id || "");
-  const [avulsoLitros, setAvulsoLitros] = useState(1);
-  const [abertos, setAbertos] = useState({ prebatch: true });
+  const [lista, setLista] = useState({});
+  const [gerandoPdf, setGerandoPdf] = useState(false);
+  const [abertos, setAbertos] = useState({ produzir: true, producoes: true, estoque: true, insumos: true });
 
   async function carregar() {
     setCarregando(true);
     setErro("");
     try {
-      const lista = await consultarSaldos();
+      const listaSaldos = await consultarSaldos();
       const porChave = {};
-      lista.forEach((saldo) => {
+      listaSaldos.forEach((saldo) => {
         const chave = chaveDaFicha(saldo.produtoId);
         if (chave) porChave[chave] = numberValue(saldo.locais?.PRODUCAO);
       });
@@ -2605,23 +2421,65 @@ function PreBatchScreen({ onNotify }) {
 
   useEffect(() => { carregar(); }, []);
 
+  const ehSugestao = modo === "sugestao";
+
   const sugestao = useMemo(
     () => explodirCascata({ saldos: saldos || {}, arredondamento }),
     [saldos, arredondamento]
   );
-  const avulso = useMemo(
-    () => explodirAvulso({ coquetelId: avulsoId, litros: avulsoLitros }),
-    [avulsoId, avulsoLitros]
+
+  const planoSugestao = useMemo(() => ({
+    lotes: sugestao.preBatches.filter((lote) => lote.produzir).map((lote) => ({
+      chave: lote.chave,
+      nome: lote.nome,
+      tipo: "prebatch",
+      ml: lote.produzir,
+      par: lote.par,
+      componentes: componentesDoBatch(lote.chave, lote.produzir),
+    })),
+    producoes: sugestao.producoes,
+    separacao: sugestao.separacao,
+    insumosBase: sugestao.insumosBase,
+  }), [sugestao]);
+
+  const planoLista = useMemo(
+    () => explodirLista({ itens: Object.entries(lista).map(([chave, litros]) => ({ chave, litros })) }),
+    [lista]
   );
 
-  const ehSugestao = modo === "sugestao";
-  const producoes = (ehSugestao ? sugestao.producoes : avulso.producoes).filter((l) => l.produzir);
-  const separacao = ehSugestao ? sugestao.separacao : avulso.separacao;
-  const insumos = ehSugestao ? sugestao.insumosBase : avulso.insumosBase;
-  const preBatchItens = ehSugestao ? sugestao.preBatches.filter((l) => l.produzir) : avulso.componentes;
-  const resumo = resumoDaCascata(sugestao);
+  const plano = ehSugestao ? planoSugestao : planoLista;
+  // Só pré-batch vira galão. Produção escolhida direto na lista já entra em
+  // `producoes` com o total certo (o pedido mais o que a cascata puxa), então
+  // contá-la aqui também a somaria duas vezes.
+  const galoes = plano.lotes.filter((lote) => lote.tipo === "prebatch");
+  // A cascata resolve quem consome primeiro — o xarope de açúcar sai por
+  // último. Na bancada é o contrário: quem é insumo dos outros se faz antes.
+  const producoesAFazer = plano.producoes.filter((lote) => lote.produzir).slice().reverse();
+  const totalLitros = roundCount(
+    (galoes.reduce((total, lote) => total + lote.ml, 0)
+      + producoesAFazer.reduce((total, lote) => total + lote.produzir, 0)) / 1000
+  );
+  const temPlano = Boolean(galoes.length || producoesAFazer.length);
+
+  const itens = useMemo(itensProduziveis, []);
+  const escolhidos = itens.filter((item) => lista[item.chave] > 0).length;
 
   const alternar = (chave) => setAbertos((atual) => ({ ...atual, [chave]: !atual[chave] }));
+
+  async function baixarChecklist() {
+    setGerandoPdf(true);
+    try {
+      await exportarChecklistProducao(
+        { galoes, producoes: producoesAFazer, separacao: plano.separacao, insumosBase: plano.insumosBase },
+        ehSugestao ? "Sugestão pelo par" : "Lista de produção"
+      );
+      onNotify("Checklist gerado.");
+    } catch (error) {
+      onNotify(error.message || "Falha ao gerar o checklist.");
+    } finally {
+      setGerandoPdf(false);
+    }
+  }
 
   return (
     <main className="screen calcScreen">
@@ -2631,8 +2489,8 @@ function PreBatchScreen({ onNotify }) {
           <button className={ehSugestao ? "selected" : ""} onClick={() => setModo("sugestao")} title="Sugestão pelo par">
             ⚖<span>Sugestão</span>
           </button>
-          <button className={!ehSugestao ? "selected" : ""} onClick={() => setModo("avulso")} title="Cálculo avulso">
-            🧮<span>Avulso</span>
+          <button className={!ehSugestao ? "selected" : ""} onClick={() => setModo("lista")} title="Montar a lista de produção">
+            📋<span>Lista</span>
           </button>
         </div>
       </div>
@@ -2646,92 +2504,106 @@ function PreBatchScreen({ onNotify }) {
           <button className="iconAcao" onClick={carregar} disabled={carregando} title="Atualizar saldo">
             {carregando ? "…" : "⟳"}
           </button>
-          <span className="calcResumo">{resumo.litros} L</span>
+          <span className="calcResumo">{totalLitros} L</span>
         </div>
       ) : (
-        <div className="calcControles avulsoControles">
-          <div className="chipGrid">
-            {preBatches().map((coquetel) => (
-              <button
-                key={coquetel.id}
-                type="button"
-                className={avulsoId === coquetel.id ? "selected" : ""}
-                onClick={() => setAvulsoId(coquetel.id)}
-              >
-                {coquetel.nome}
-              </button>
+        <>
+          <div className="produzGrid">
+            {itens.map((item) => (
+              <CardProduzir
+                key={item.chave}
+                item={item}
+                litros={lista[item.chave] || 0}
+                onChange={(litros) => setLista((atual) => ({ ...atual, [item.chave]: litros }))}
+              />
             ))}
           </div>
-          <label className="calcLitros">
-            <input
-              type="number"
-              min="0"
-              step="0.5"
-              inputMode="decimal"
-              value={avulsoLitros}
-              onChange={(event) => setAvulsoLitros(numberValue(event.target.value))}
-            />
-            <span>litros</span>
-          </label>
-        </div>
+          <div className="calcControles">
+            <button className="ghostButton compact" onClick={() => setLista({})} disabled={!escolhidos}>Limpar</button>
+            <span className="calcResumo">{escolhidos} item(ns) · {totalLitros} L</span>
+          </div>
+        </>
       )}
 
       {erro && <p className="warning">{erro}</p>}
 
-      <BlocoDobravel
-        icone="🥃"
-        titulo={ehSugestao ? "Produzir" : "No galão"}
-        itens={preBatchItens}
-        aberto={Boolean(abertos.prebatch)}
-        onToggle={() => alternar("prebatch")}
-        render={(item) => (ehSugestao
-          ? <LinhaCalc key={item.chave} nome={item.nome} valor={`${emLitros(item.produzir)} L`} detalhe={`par ${emLitros(item.par)}`} />
-          : <LinhaCalc key={item.chave} nome={item.nome} valor={quantidadeLegivel(item.ml, "ml")} />
-        )}
-      />
+      <div className="calcAcoes">
+        <Button onClick={baixarChecklist} disabled={!temPlano || gerandoPdf}>
+          {gerandoPdf ? "Gerando..." : "Baixar checklist (PDF)"}
+        </Button>
+      </div>
 
-      <BlocoDobravel
-        icone="🧪"
-        titulo="Produções"
-        itens={producoes}
-        aberto={Boolean(abertos.producoes)}
-        onToggle={() => alternar("producoes")}
-        render={(item) => (
-          <LinhaCalc key={item.chave} nome={item.nome} valor={`${emLitros(item.produzir)} L`} detalhe={`${validadeDias(item.chave)}d`} />
-        )}
-      />
+      {!temPlano && (
+        <EmptyState
+          title={ehSugestao ? "Nada a produzir" : "Nenhum item escolhido"}
+          text={ehSugestao ? "Todos os pré-batches estão no par." : "Escolha o que fazer e a quantidade nos cards acima."}
+        />
+      )}
 
-      <BlocoDobravel
-        icone="🍾"
-        titulo="Do estoque"
-        itens={separacao}
-        aberto={Boolean(abertos.estoque)}
-        onToggle={() => alternar("estoque")}
-        render={(item) => (
-          <LinhaCalc
-            key={item.chave}
-            nome={item.nome}
-            valor={`${item.unidades} ${item.unidadeEstoque}`}
-            detalhe={quantidadeLegivel(item.qtdReceita, item.unidadeReceita)}
-          />
-        )}
-      />
+      <div className="calcGrid">
+        <BlocoDobravel
+          icone="🥃"
+          titulo="Produzir"
+          itens={galoes}
+          aberto={Boolean(abertos.produzir)}
+          onToggle={() => alternar("produzir")}
+          render={(lote) => (
+            <GrupoCalc
+              key={lote.chave}
+              titulo={lote.nome}
+              detalhe={`${emLitros(lote.ml)} L`}
+            >
+              {lote.par ? <p className="grupoNota">par {emLitros(lote.par)} L · validade {validadeDias(lote.chave)} dias</p> : null}
+              {lote.componentes.map((componente) => (
+                <LinhaCalc key={componente.chave} nome={componente.nome} valor={quantidadeLegivel(componente.ml, "ml")} />
+              ))}
+            </GrupoCalc>
+          )}
+        />
 
-      <BlocoDobravel
-        icone="🧂"
-        titulo="Insumos"
-        itens={insumos}
-        aberto={Boolean(abertos.insumos)}
-        onToggle={() => alternar("insumos")}
-        render={(item) => (
-          <LinhaCalc
-            key={item.chave}
-            nome={item.nome}
-            valor={quantidadeLegivel(item.qtdReceita, item.unidadeReceita)}
-            detalhe={item.embalagemFechada ? `${item.unidades} ${item.unidadeEstoque}` : ""}
-          />
-        )}
-      />
+        <BlocoDobravel
+          icone="🧪"
+          titulo="Produções"
+          itens={producoesAFazer}
+          aberto={Boolean(abertos.producoes)}
+          onToggle={() => alternar("producoes")}
+          render={(item) => (
+            <LinhaCalc key={item.chave} nome={item.nome} valor={`${emLitros(item.produzir)} L`} detalhe={`${validadeDias(item.chave)}d`} />
+          )}
+        />
+
+        <BlocoDobravel
+          icone="🍾"
+          titulo="Do estoque"
+          itens={plano.separacao}
+          aberto={Boolean(abertos.estoque)}
+          onToggle={() => alternar("estoque")}
+          render={(item) => (
+            <LinhaCalc
+              key={item.chave}
+              nome={item.nome}
+              valor={`${item.unidades} ${item.unidadeEstoque}`}
+              detalhe={quantidadeLegivel(item.qtdReceita, item.unidadeReceita)}
+            />
+          )}
+        />
+
+        <BlocoDobravel
+          icone="🧂"
+          titulo="Insumos"
+          itens={plano.insumosBase}
+          aberto={Boolean(abertos.insumos)}
+          onToggle={() => alternar("insumos")}
+          render={(item) => (
+            <LinhaCalc
+              key={item.chave}
+              nome={item.nome}
+              valor={quantidadeLegivel(item.qtdReceita, item.unidadeReceita)}
+              detalhe={item.embalagemFechada ? `${item.unidades} ${item.unidadeEstoque}` : ""}
+            />
+          )}
+        />
+      </div>
     </main>
   );
 }
@@ -3312,14 +3184,17 @@ function FichaProducao({ producao, aberto, onToggle }) {
   );
 }
 
-// Leitura de MOVIMENTOS enquanto a Fase 2 acumula histórico. Não é o painel
-// da Fase 5 — é o mínimo para conferir que o espelho está gravando certo.
-function MovementsScreen({ products, onNotify }) {
+// Movimentos e histórico numa tela só (26/08/2026). Eram duas portas para a
+// mesma história: o saldo é o retrato de agora, o lançamento é como se chegou
+// nele, e o inventário é a contagem que gerou o ajuste. Separar isso obrigava
+// a abrir duas telas para responder uma pergunta.
+function MovementsScreen({ products, inventories, onDetails, onNotify }) {
   const [aba, setAba] = useState("saldos");
   const [saldos, setSaldos] = useState([]);
   const [movimentos, setMovimentos] = useState([]);
   const [local, setLocal] = useState("");
   const [busca, setBusca] = useState("");
+  const [filtros, setFiltros] = useState({ bar: "", tipo: "", data: "" });
   const [carregando, setCarregando] = useState(false);
   const [status, setStatus] = useState("");
 
@@ -3345,19 +3220,34 @@ function MovementsScreen({ products, onNotify }) {
     }
   }
 
-  useEffect(() => { carregar(); }, [local]);
+  // A planilha só é consultada quando a aba precisa dela: quem abriu para ver
+  // uma contagem antiga não espera a rede.
+  const abaDaPlanilha = aba !== "inventarios";
+  useEffect(() => {
+    if (abaDaPlanilha) carregar();
+  }, [local, abaDaPlanilha]);
 
   const query = busca.trim().toLowerCase();
+  const combinaProduto = (nome) => !query || String(nome || "").toLowerCase().includes(query);
+
   const saldosVisiveis = saldos
-    .filter((saldo) => !query || nomeDe(saldo.produtoId).toLowerCase().includes(query))
+    .filter((saldo) => combinaProduto(nomeDe(saldo.produtoId)))
     .filter((saldo) => !local || numberValue(saldo.locais[local]))
     .sort((a, b) => nomeDe(a.produtoId).localeCompare(nomeDe(b.produtoId), "pt-BR"));
 
   const movimentosVisiveis = movimentos
-    .filter((movimento) => !query || nomeDe(movimento.produtoId).toLowerCase().includes(query))
+    .filter((movimento) => combinaProduto(nomeDe(movimento.produtoId)))
+    .filter((movimento) => !filtros.data || String(movimento.timestamp || "").slice(0, 10) === filtros.data)
     .slice()
     .reverse()
     .slice(0, 200);
+
+  const inventariosVisiveis = inventories.filter((inventory) => (
+    (!filtros.bar || inventory.bar === filtros.bar) &&
+    (!filtros.tipo || inventory.tipo === filtros.tipo) &&
+    (!filtros.data || inventory.data === filtros.data) &&
+    (!query || inventory.itens.some((item) => combinaProduto(item.nome) && (item.fechamentoContado || numberValue(item.quantidade) > 0)))
+  ));
 
   // A quebra do período é a soma dos ajustes que as contagens geraram.
   const quebra = roundCount(movimentos
@@ -3367,28 +3257,39 @@ function MovementsScreen({ products, onNotify }) {
   return (
     <main className="screen">
       <h1>Movimentos</h1>
-      <p className="miniText">
-        Saldo é sempre calculado: soma do que entrou menos o que saiu de cada local. As linhas
-        de CONTAGEM registram a conferência e ficam fora da conta; quem move o saldo é o AJUSTE
-        que a contagem gera, e é ele que mede a quebra.
-      </p>
+      {abaDaPlanilha && (
+        <p className="miniText">
+          Saldo é sempre calculado: soma do que entrou menos o que saiu de cada local. As linhas
+          de CONTAGEM registram a conferência e ficam fora da conta; quem move o saldo é o AJUSTE
+          que a contagem gera, e é ele que mede a quebra.
+        </p>
+      )}
       <div className="quickFilters">
         <button className={aba === "saldos" ? "selected" : ""} onClick={() => setAba("saldos")}>Saldos</button>
         <button className={aba === "movimentos" ? "selected" : ""} onClick={() => setAba("movimentos")}>Lançamentos</button>
+        <button className={aba === "inventarios" ? "selected" : ""} onClick={() => setAba("inventarios")}>Inventários</button>
       </div>
       <div className="filterGrid">
         <Input label="Produto" value={busca} onChange={setBusca} placeholder="Buscar por nome" />
-        <Select label="Local" value={local} onChange={setLocal} options={["", ...CODIGOS_LOCAIS]} />
+        {aba !== "saldos" && <Input label="Data" type="date" value={filtros.data} onChange={(data) => setFiltros({ ...filtros, data })} />}
+        {abaDaPlanilha && <Select label="Local" value={local} onChange={setLocal} options={["", ...CODIGOS_LOCAIS]} />}
+        {aba === "inventarios" && <Select label="Bar" value={filtros.bar} onChange={(bar) => setFiltros({ ...filtros, bar })} options={["", ...BARS]} />}
+        {aba === "inventarios" && <Select label="Tipo" value={filtros.tipo} onChange={(tipo) => setFiltros({ ...filtros, tipo })} options={["", ...INVENTORY_TYPES]} />}
       </div>
-      <div className="summaryGrid">
-        <Metric label="Produtos" value={saldosVisiveis.length} />
-        <Metric label="Movimentos" value={movimentos.length} />
-        <Metric label="Quebra acumulada" value={quebra} />
-      </div>
-      <div className="bottomActions inline">
-        <button className="ghostButton" onClick={carregar} disabled={carregando}>{carregando ? "Atualizando..." : "Atualizar"}</button>
-      </div>
-      {status && <p className="miniText">{status}</p>}
+
+      {abaDaPlanilha && (
+        <>
+          <div className="summaryGrid">
+            <Metric label="Produtos" value={saldosVisiveis.length} />
+            <Metric label="Movimentos" value={movimentos.length} />
+            <Metric label="Quebra acumulada" value={quebra} />
+          </div>
+          <div className="bottomActions inline">
+            <button className="ghostButton" onClick={carregar} disabled={carregando}>{carregando ? "Atualizando..." : "Atualizar"}</button>
+          </div>
+          {status && <p className="miniText">{status}</p>}
+        </>
+      )}
 
       {aba === "saldos" && (
         <>
@@ -3414,7 +3315,7 @@ function MovementsScreen({ products, onNotify }) {
 
       {aba === "movimentos" && (
         <>
-          {!movimentosVisiveis.length && <EmptyState title="Nenhum movimento" text="As contagens enviadas aparecem aqui." />}
+          {!movimentosVisiveis.length && <EmptyState title="Nenhum movimento" text="As contagens e as requisições separadas aparecem aqui." />}
           <div className="list">
             {movimentosVisiveis.map((movimento) => (
               <article className="historyCard" key={movimento.movId}>
@@ -3435,6 +3336,27 @@ function MovementsScreen({ products, onNotify }) {
           {movimentos.length > movimentosVisiveis.length && (
             <p className="miniText">Mostrando os 200 mais recentes de {movimentos.length}.</p>
           )}
+        </>
+      )}
+
+      {aba === "inventarios" && (
+        <>
+          {!inventariosVisiveis.length && <EmptyState title="Nenhum inventário encontrado" text="Os envios finalizados aparecem aqui." />}
+          <div className="list">
+            {inventariosVisiveis.map((inventory) => (
+              <article className="historyCard" key={inventory.id}>
+                <div>
+                  <h3>{formatDate(inventory.data)} · Bar {inventory.bar}</h3>
+                  <p>{inventory.tipo} · {inventory.turno} · {inventory.lider}</p>
+                  {query && inventory.itens.filter((item) => combinaProduto(item.nome)).slice(0, 3).map((item) => (
+                    <p key={item.produtoId}>{item.nome}: {numberValue(item.quantidade)}</p>
+                  ))}
+                  <span className="status">Enviado</span>
+                </div>
+                <button className="ghostButton compact" onClick={() => onDetails(inventory)}>Ver detalhes</button>
+              </article>
+            ))}
+          </div>
         </>
       )}
     </main>

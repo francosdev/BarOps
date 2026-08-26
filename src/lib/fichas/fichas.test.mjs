@@ -3,7 +3,7 @@
 // O teste que importa é o último: a cascata montada a partir dos dados deste
 // módulo tem que reproduzir os 18 números canônicos do escopo da Fase 4. Se
 // divergir, o dado aqui está errado — não o teste.
-import { explodirCascata } from "./cascata.js";
+import { componentesDoBatch, explodirCascata, explodirLista } from "./cascata.js";
 import {
   PLANILHA_DESATUALIZADA,
   PRODUCOES,
@@ -138,6 +138,39 @@ ok("Negroni é 100% batch: nada no serviço", totalDoServico("cq-negroni"), 0);
 // Manjericão só é puxado pela prateleira de serviço; se o Basil Smash entrasse
 // na OP a demanda subiria e o teste de aceite quebraria.
 ok("manjericão fica nos 8 L da prateleira", litros("prod-xarope-manjericao"), 8.00, 0.006);
+
+console.log("\n--- lista de produção montada à mão ---");
+// Uma lista de um item é o antigo cálculo avulso: 25 L de Negroni no galão
+// são a receita rateada, sem olhar par nem saldo.
+const umItem = explodirLista({ itens: [{ chave: "cq-negroni", litros: 25 }] });
+const negroniNoGalao = componentesDoBatch("cq-negroni", 25000);
+ok("um item: 25 L de Negroni viram um lote", umItem.lotes.length, 1);
+ok("e o galão soma 25 L", umItem.lotes[0].componentes.reduce((t, c) => t + c.ml, 0) / 1000, 25, 0.01);
+ok("Negroni é 1/3 de cada: 8,33 L de Campari", negroniNoGalao.find((c) => c.chave === "campari").ml / 1000, 8.33, 0.01);
+ok("Campari em garrafas fechadas", umItem.separacao.find((s) => s.chave === "campari").unidades, 9);
+
+// Vários itens somam a demanda, e o insumo compartilhado sai numa linha só.
+const varios = explodirLista({ itens: [
+  { chave: "cq-negroni", litros: 25 },
+  { chave: "cq-ephigenia", litros: 25 },
+] });
+const linhasTanqueray = varios.separacao.filter((s) => s.chave === "tanqueray");
+ok("dois itens viram dois lotes", varios.lotes.length, 2);
+ok("insumo compartilhado sai em linha única", linhasTanqueray.length, 1);
+ok("e soma as duas demandas (8,33 + 17,86 L de gin)", linhasTanqueray[0].qtdReceita, 26190.48, 0.02);
+
+// Produção escolhida direto entra como demanda e ainda puxa a cascata: cada
+// litro de xarope de manjericão consome 1076,92 ml de xarope de açúcar.
+const soProducao = explodirLista({ itens: [{ chave: "prod-xarope-manjericao", litros: 12 }] });
+const acucarDaLista = soProducao.producoes.find((p) => p.chave === "prod-xarope-acucar");
+ok("produção escolhida não vira lote de galão", soProducao.lotes[0].componentes, []);
+ok("mas puxa o xarope de açúcar (12,92 L)", acucarDaLista.produzir / 1000, 12.92, 0.01);
+ok("e o açúcar chega aos insumos base (10,77 kg)", soProducao.insumosBase.find((s) => s.chave === "acucar").qtdReceita / 1000, 10.77, 0.01);
+
+// Volume zero não é erro: é um card que ninguém preencheu.
+const vazia = explodirLista({ itens: [{ chave: "cq-negroni", litros: 0 }] });
+ok("volume zero não entra na lista", vazia.lotes, []);
+ok("e não gera separação", vazia.separacao, []);
 
 console.log("\n--- pendências que sobraram na ficha ---");
 const pendencias = resumoDePendencias();

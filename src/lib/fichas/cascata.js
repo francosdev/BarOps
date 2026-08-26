@@ -60,7 +60,7 @@ export function explodirCascata({ saldos = {}, arredondamento = "litro" } = {}) 
 }
 
 /**
- * Miolo compartilhado entre a sugestão automática e o cálculo avulso:
+ * Miolo compartilhado entre a sugestão automática e a lista montada à mão:
  * resolve as produções na ordem de dependência e converte tudo para unidade
  * de estoque.
  *
@@ -104,34 +104,64 @@ function resolverEConverter(demanda, acrescentar, saldoDe) {
 }
 
 /**
- * Cálculo avulso: "quero fazer N litros deste pré-batch, o que preciso?".
- *
- * Não olha saldo nem par — é conta de receita pura, para quem já decidiu o
- * volume. Devolve o que vai no batch, as produções que isso exige se forem
- * feitas do zero, e os insumos base correspondentes.
+ * O que entra no galão de N ml de um pré-batch, rateado pelo total da dose.
+ * Sai cru — quem publica arredonda; quem soma na demanda usa o número exato.
  */
-export function explodirAvulso({ coquetelId, litros }) {
+function componentesCrus(coquetelId, ml) {
   const coquetel = coquetelPorId(coquetelId);
-  const ml = Math.max(0, Number(litros) || 0) * 1000;
-  if (!coquetel || !ml) {
-    return { coquetel, ml: 0, componentes: [], producoes: [], separacao: [], insumosBase: [] };
-  }
+  if (!coquetel || !ml) return [];
+  const total = totalDoBatch(coquetelId);
+  return coquetel.batch.map((linha) => ({
+    chave: linha.insumo,
+    nome: nomeDaReferencia(linha.insumo),
+    ml: ml * linha.ml / total,
+  }));
+}
 
+export function componentesDoBatch(coquetelId, ml) {
+  return componentesCrus(coquetelId, ml).map((linha) => ({ ...linha, ml: arredonda2(linha.ml) }));
+}
+
+/**
+ * Ordem de produção montada à mão: "quero fazer esta lista, nestes volumes".
+ *
+ * Não olha saldo nem par — quem monta a lista já decidiu o que vai produzir.
+ * Aceita pré-batch e produção na mesma lista: o pré-batch explode em seus
+ * componentes, a produção entra direto como demanda, e a cascata resolve o
+ * resto na ordem de dependência.
+ *
+ * Uma lista de um item só é o antigo cálculo avulso.
+ */
+export function explodirLista({ itens = [] } = {}) {
   const demanda = {};
   const acrescentar = (chave, quantidade) => { demanda[chave] = (demanda[chave] || 0) + quantidade; };
-  const total = totalDoBatch(coquetelId);
 
-  // O que entra no galão, rateado pelo total da dose.
-  const componentes = coquetel.batch.map((linha) => {
-    const quantidade = ml * linha.ml / total;
-    acrescentar(linha.insumo, quantidade);
-    return { chave: linha.insumo, nome: nomeDaReferencia(linha.insumo), ml: arredonda2(quantidade) };
-  });
+  const lotes = itens
+    .map((item) => ({ chave: item.chave, ml: Math.max(0, Number(item.litros) || 0) * 1000 }))
+    .filter((item) => item.ml > 0)
+    .map(({ chave, ml }) => {
+      const coquetel = coquetelPorId(chave);
+      if (coquetel) {
+        const componentes = componentesCrus(chave, ml);
+        componentes.forEach((linha) => acrescentar(linha.chave, linha.ml));
+        return {
+          chave,
+          nome: coquetel.nome,
+          tipo: "prebatch",
+          ml: arredonda2(ml),
+          componentes: componentes.map((linha) => ({ ...linha, ml: arredonda2(linha.ml) })),
+        };
+      }
+      const producao = producaoPorId(chave);
+      if (!producao) return null;
+      acrescentar(chave, ml);
+      return { chave, nome: producao.nome, tipo: "producao", ml: arredonda2(ml), componentes: [] };
+    })
+    .filter(Boolean);
 
-  // Sem saldo: quem pede avulso quer a conta do zero.
   const { lotesProducao, separacao, insumosBase } = resolverEConverter(demanda, acrescentar, () => 0);
 
-  return { coquetel, ml, componentes, producoes: lotesProducao, separacao, insumosBase };
+  return { lotes, producoes: lotesProducao, separacao, insumosBase };
 }
 
 function montarLinha(chave, qtdReceita) {
@@ -147,17 +177,6 @@ function montarLinha(chave, qtdReceita) {
     unidades: insumo.embalagemFechada ? Math.ceil(bruto) : arredonda2(bruto),
     unidadeEstoque: insumo.unidadeEstoque,
     embalagemFechada: insumo.embalagemFechada,
-  };
-}
-
-/** Total de produções que a cascata mandou fazer, para o resumo da tela. */
-export function resumoDaCascata(resultado) {
-  return {
-    preBatches: resultado.preBatches.filter((lote) => lote.produzir).length,
-    producoes: resultado.producoes.filter((lote) => lote.produzir).length,
-    litros: arredonda2(
-      [...resultado.preBatches, ...resultado.producoes].reduce((total, lote) => total + lote.produzir, 0) / 1000
-    ),
   };
 }
 
