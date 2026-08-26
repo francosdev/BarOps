@@ -90,23 +90,63 @@ function doPost(e) {
     const rota = ROTAS[payload.action];
     if (rota) return jsonResponse(rota(payload));
 
+    // Leitura de estoque. Antes devolvia so uma coluna, escolhida aqui pelo
+    // cabecalho "Fecha" com fallback cego na coluna 3 — e a aba de referencia
+    // (ESTOQUE GERAL) tem varias colunas de fechamento, uma por dia. Adivinhar
+    // qual era dava numero errado sem avisar ninguem.
+    //
+    // Agora devolve a grade inteira e quem escolhe a coluna e o app, que
+    // mostra o cabecalho para a pessoa. `itens` continua saindo com a coluna
+    // padrao para nao quebrar versao antiga do app.
     if (payload.action === "estoque") {
       const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-      const sheetName = payload.sheet || "SEXTA";
+      const sheetName = payload.sheet || "ESTOQUE GERAL";
       const sheet = ss.getSheetByName(sheetName);
-      if (!sheet) throw new Error("Aba nao encontrada: " + sheetName);
+      if (!sheet) {
+        const nomes = ss.getSheets().map(function (aba) { return aba.getName(); });
+        throw new Error("Aba nao encontrada: " + sheetName + ". Abas da planilha: " + nomes.join(", "));
+      }
       const lastRow = sheet.getLastRow();
-      const fechaColumn = findHeaderColumn(sheet, "Fecha") || 3;
-      const values = sheet.getRange(1, 1, lastRow, fechaColumn).getValues();
-      const itens = [];
-      values.forEach(function (row) {
-        const produto = String(row[0] || "").trim();
-        if (!produto) return;
-        const quantidade = Number(row[fechaColumn - 1]);
-        if (!Number.isFinite(quantidade)) return;
-        itens.push({ produto: produto, quantidade: quantidade });
+      const lastCol = Math.min(sheet.getLastColumn(), 20);
+      const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+
+      // O cabecalho nem sempre esta na linha 1: a aba costuma abrir com
+      // titulo. Vale a primeira linha que tem texto em duas colunas ou mais.
+      let headerRow = 0;
+      for (let i = 0; i < Math.min(values.length, 10); i++) {
+        let preenchidas = 0;
+        for (let j = 0; j < values[i].length; j++) {
+          if (String(values[i][j] || "").trim()) preenchidas++;
+        }
+        if (preenchidas >= 2) { headerRow = i; break; }
+      }
+      const cabecalhos = values[headerRow].map(function (celula, indice) {
+        const texto = String(celula || "").trim();
+        return { indice: indice, nome: texto || "Coluna " + (indice + 1) };
       });
-      return jsonResponse({ ok: true, sheet: sheetName, itens: itens });
+
+      const linhas = [];
+      const itens = [];
+      const padrao = (findHeaderColumn(sheet, "Fecha") || 3) - 1;
+      for (let i = headerRow + 1; i < values.length; i++) {
+        const produto = String(values[i][0] || "").trim();
+        if (!produto) continue;
+        const valores = values[i].map(function (celula) {
+          const numero = Number(celula);
+          return Number.isFinite(numero) && String(celula).trim() !== "" ? numero : null;
+        });
+        linhas.push({ produto: produto, valores: valores });
+        if (valores[padrao] !== null) itens.push({ produto: produto, quantidade: valores[padrao] });
+      }
+
+      return jsonResponse({
+        ok: true,
+        sheet: sheetName,
+        cabecalhos: cabecalhos,
+        colunaPadrao: padrao,
+        linhas: linhas,
+        itens: itens,
+      });
     }
 
     const sheetName = payload.sheet;

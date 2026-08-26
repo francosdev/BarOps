@@ -2,6 +2,12 @@ import { STORAGE_KEYS, loadJson, saveJson } from "./storage.js";
 
 export const DEFAULT_INTEGRATION = {
   appsScriptUrl: "https://script.google.com/macros/s/AKfycbwkpfNZz_CAr7viDL8YvFjE2J_o9wyd3gybqrZMyAE94WO3UaUFSKI89gk-srqvEg/exec",
+  // Referência do estoque, definida por Carlos em 26/08/2026: a aba
+  // ESTOQUE GERAL, na coluna do fechamento de domingo. A coluna é guardada
+  // pelo índice porque o nome do cabeçalho varia de planilha para planilha;
+  // null significa "ainda não escolhida" e o app pergunta na tela Estoque.
+  estoqueAba: "ESTOQUE GERAL",
+  estoqueColuna: null,
 };
 
 // URLs de implantações antigas do Apps Script (substituídas em 05/07/2026);

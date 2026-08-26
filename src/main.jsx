@@ -924,6 +924,9 @@ function normalizeMatchName(value) {
     .replace(/\s+/g, " ");
 }
 
+// Devolve a grade da aba: cabeçalhos, linhas e a coluna que o script usaria
+// por padrão. Script antigo (sem `cabecalhos`) ainda responde com `itens`, e
+// a tela avisa que falta republicar em vez de quebrar.
 export async function fetchSheetStock(sheetName) {
   const integration = loadIntegration();
   if (!integration.appsScriptUrl) throw new Error("Configure a URL do Apps Script primeiro.");
@@ -941,19 +944,40 @@ export async function fetchSheetStock(sheetName) {
     throw new Error("O Google respondeu com uma página de erro. Verifique se o Apps Script foi republicado com a versão mais recente.");
   }
   if (!response.ok || result.ok === false) throw new Error(result.error || "Falha ao consultar a planilha.");
-  return result.itens || [];
+  return {
+    sheet: result.sheet || sheetName,
+    cabecalhos: result.cabecalhos || null,
+    colunaPadrao: typeof result.colunaPadrao === "number" ? result.colunaPadrao : null,
+    linhas: result.linhas || (result.itens || []).map((item) => ({ produto: item.produto, valores: [item.produto, item.quantidade] })),
+    colunaLegado: result.cabecalhos ? null : 1,
+  };
 }
 
+// Só letras e dígitos: faz "Refrigerante Coca-Cola" e "Refrigerante Coca Cola"
+// serem o mesmo nome sem abrir a porta para parecido virar igual.
+function apenasAlfanumerico(value) {
+  return normalizeMatchName(value).replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Casa o produto do app com a linha da planilha. Exige nome igual — igual de
+ * verdade, tolerando só acento, espaço e pontuação.
+ *
+ * A versão antiga caía num "contém" nos dois sentidos e ficava com o candidato
+ * mais longo. Nos 71 produtos da lista oficial isso dá 20 colisões, e as
+ * piores trocam o produto em silêncio: "Mel" casava com "Xarope caramelo
+ * salgado" (ca-mel-o), "Aperol" com "Taça Aperol acrílica" — estoque de
+ * bebida recebendo contagem de taça. Nome que não bate agora volta como não
+ * encontrado, e a tela lista para a pessoa corrigir na planilha.
+ */
 function matchSheetQuantity(sheetItems, productName) {
   const target = normalizeMatchName(productName);
   const exact = sheetItems.find((item) => item.norm === target);
   if (exact) return exact.quantidade;
-  // Prefere o candidato mais específico: linhas de título curtas da planilha
-  // (ex. "EPHIGENIA", "COPOS") não podem vencer o nome real do produto.
-  const fuzzy = sheetItems
-    .filter((item) => item.norm && (target.includes(item.norm) || item.norm.includes(target)))
-    .sort((a, b) => b.norm.length - a.norm.length)[0];
-  return fuzzy ? fuzzy.quantidade : undefined;
+  const alvo = apenasAlfanumerico(productName);
+  const iguais = sheetItems.filter((item) => item.alfa && item.alfa === alvo);
+  // Empate é ambiguidade: duas linhas com o mesmo nome não decidem nada.
+  return iguais.length === 1 ? iguais[0].quantidade : undefined;
 }
 
 function buildCountReportRows(inventory, products) {
@@ -1067,18 +1091,33 @@ function App() {
     setScreen("login");
   }
 
-  async function syncStockFromSheet(sheetName) {
-    const itens = await fetchSheetStock(sheetName);
-    const sheetItems = itens.map((item) => ({ norm: normalizeMatchName(item.produto), quantidade: numberValue(item.quantidade) }));
+  // A referência do estoque é a aba ESTOQUE GERAL na coluna do fechamento de
+  // domingo. A coluna vem da configuração porque o cabeçalho varia; sem ela
+  // escolhida, cai na que o script sugere.
+  async function syncStockFromSheet(sheetName, coluna) {
+    const grade = await fetchSheetStock(sheetName);
+    const indice = coluna ?? grade.colunaLegado ?? grade.colunaPadrao ?? 1;
+    const sheetItems = grade.linhas.map((linha) => ({
+      norm: normalizeMatchName(linha.produto),
+      alfa: apenasAlfanumerico(linha.produto),
+      quantidade: numberValue(linha.valores[indice]),
+      temValor: linha.valores[indice] !== null && linha.valores[indice] !== undefined,
+    })).filter((item) => item.temValor);
+
+    const naoEncontrados = [];
     let updated = 0;
     const next = products.map((product) => {
+      if (!product.ativo) return product;
       const quantidade = matchSheetQuantity(sheetItems, product.nome);
-      if (quantidade === undefined) return product;
+      if (quantidade === undefined) {
+        naoEncontrados.push(product.nome);
+        return product;
+      }
       updated += 1;
       return { ...product, estoqueAtual: roundCount(quantidade) };
     });
     setProducts(next);
-    return { updated, total: itens.length };
+    return { updated, total: sheetItems.length, naoEncontrados, grade, indice };
   }
 
   function openHome() {
@@ -1113,7 +1152,15 @@ function App() {
           onRequisicoes={() => setScreen("requisicoes")}
         />
       )}
-      {screen === "stock" && isAdmin && <StockScreen products={products} onSync={syncStockFromSheet} />}
+      {screen === "stock" && isAdmin && (
+        <StockScreen
+          products={products}
+          integration={integration}
+          onIntegrationChange={setIntegration}
+          onSync={syncStockFromSheet}
+          onNotify={notify}
+        />
+      )}
       {screen === "new" && (
         <NewInventoryScreen
           products={products}
@@ -1166,14 +1213,12 @@ function App() {
             try {
               const result = await sendInventoryToSheet(sent);
               const missing = result.result?.missing || [];
-              const countedById = new Map(sent.itens.filter((item) => item.fechamentoContado).map((item) => [item.produtoId, roundCount(item.quantidade)]));
-              if (countedById.size) {
-                setProducts((current) => current.map((product) => (
-                  countedById.has(product.id)
-                    ? { ...product, estoqueAtual: countedById.get(product.id) }
-                    : product
-                )));
-              }
+              // Até 26/08/2026 o envio gravava `estoqueAtual = o que ESTE bar
+              // contou`. Só que a planilha SOMA os bares do mesmo dia na
+              // coluna Fecha: contar o 22 (500) e depois o 23 (300) deixava a
+              // planilha em 800 e o app em 300. A contagem de um bar não é o
+              // estoque da casa — quem manda no estoque é a aba de referência,
+              // lida no botão "Atualizar da planilha" da tela Estoque atual.
               const espelho = result.result?.espelho || null;
               const espelhoErro = result.result?.espelhoErro || "";
               const resumoEspelho = espelho
@@ -1944,27 +1989,49 @@ function IntegrationScreen({ integration, onChange, products, onNotify }) {
   );
 }
 
-function StockScreen({ products, onSync }) {
+// Estoque atual é espelho da planilha, não um número que o app inventa. A
+// referência é a aba ESTOQUE GERAL na coluna do fechamento de domingo; a
+// coluna fica na configuração porque o cabeçalho varia de planilha para
+// planilha, e adivinhá-la foi o que fazia o estoque não bater.
+function StockScreen({ products, integration, onIntegrationChange, onSync, onNotify }) {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("nome");
   const [sortAsc, setSortAsc] = useState(true);
-  const [sheetName, setSheetName] = useState("ESTOQUE GERAL");
+  const [sheetName, setSheetName] = useState(integration.estoqueAba || "ESTOQUE GERAL");
+  const [grade, setGrade] = useState(null);
+  const [coluna, setColuna] = useState(integration.estoqueColuna);
+  const [naoEncontrados, setNaoEncontrados] = useState([]);
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState("");
+  const [verFaltantes, setVerFaltantes] = useState(false);
   const query = search.trim().toLowerCase();
 
-  async function syncNow() {
+  async function syncNow(aba = sheetName, indice = coluna) {
     setSyncing(true);
     setSyncStatus("Consultando a planilha...");
     try {
-      const { updated, total } = await onSync(sheetName);
-      setSyncStatus(`Estoque atualizado da aba ${sheetName}: ${updated} produtos atualizados (${total} itens lidos).`);
+      const resultado = await onSync(aba, indice ?? undefined);
+      setGrade(resultado.grade);
+      setColuna(resultado.indice);
+      setNaoEncontrados(resultado.naoEncontrados);
+      onIntegrationChange({ ...integration, estoqueAba: aba, estoqueColuna: resultado.indice });
+      const nomeColuna = resultado.grade.cabecalhos?.[resultado.indice]?.nome || `coluna ${resultado.indice + 1}`;
+      setSyncStatus(
+        `${aba} · ${nomeColuna} · ${resultado.updated} produto(s) atualizado(s) de ${resultado.total} linha(s)` +
+        (resultado.naoEncontrados.length ? ` · ${resultado.naoEncontrados.length} sem linha na planilha` : "") +
+        (resultado.grade.cabecalhos ? "" : " · republique o Apps Script para escolher a coluna")
+      );
     } catch (error) {
       setSyncStatus(error.message || "Falha ao consultar a planilha.");
+      onNotify(error.message || "Falha ao consultar a planilha.");
     } finally {
       setSyncing(false);
     }
   }
+
+  // Abre já sincronizado: estoque que só bate depois de alguém lembrar de
+  // clicar não bate.
+  useEffect(() => { syncNow(); }, []);
 
   const rows = products
     .filter((product) => product.ativo && (!query || product.nome.toLowerCase().includes(query)))
@@ -1972,6 +2039,7 @@ function StockScreen({ products, onSync }) {
       ...product,
       categoriaOperacional: getOperationalCategory(product),
       estoque: numberValue(product.estoqueAtual),
+      semLinha: naoEncontrados.includes(product.nome),
     }))
     .sort((a, b) => {
       const direction = sortAsc ? 1 : -1;
@@ -1996,18 +2064,46 @@ function StockScreen({ products, onSync }) {
 
   const lowCount = rows.filter((product) => stockLevel(product) === "baixo").length;
   const emptyCount = rows.filter((product) => stockLevel(product) === "zerado").length;
+  const colunas = grade?.cabecalhos || [];
 
   return (
     <main className="screen">
       <h1>Estoque atual</h1>
       <section className="panel stack">
         <div className="fieldGrid">
-          <Select label="Aba da planilha" value={sheetName} onChange={setSheetName} options={["ESTOQUE GERAL", "SEXTA", "SABADO", "DOMINGO"]} />
+          <Select
+            label="Aba da planilha"
+            value={sheetName}
+            onChange={(valor) => { setSheetName(valor); syncNow(valor, null); }}
+            options={["ESTOQUE GERAL", "SEXTA", "SABADO", "DOMINGO"]}
+          />
+          {colunas.length > 0 && (
+            <Select
+              label="Coluna de referência"
+              value={String(coluna ?? "")}
+              onChange={(valor) => syncNow(sheetName, Number(valor))}
+              options={colunas.map((cabecalho) => String(cabecalho.indice))}
+              rotulos={colunas.map((cabecalho) => cabecalho.nome)}
+            />
+          )}
           <div className="bottomActions inline">
-            <Button onClick={syncNow} disabled={syncing}>{syncing ? "Atualizando..." : "Atualizar da planilha"}</Button>
+            <Button onClick={() => syncNow()} disabled={syncing}>{syncing ? "Atualizando..." : "Atualizar da planilha"}</Button>
           </div>
         </div>
         {syncStatus && <p className="miniText">{syncStatus}</p>}
+        {naoEncontrados.length > 0 && (
+          <>
+            <button className="ghostButton compact" onClick={() => setVerFaltantes(!verFaltantes)}>
+              {verFaltantes ? "Esconder" : "Ver"} os {naoEncontrados.length} sem linha na planilha
+            </button>
+            {verFaltantes && (
+              <p className="miniText">
+                Estes produtos ficaram com o último valor conhecido porque nenhuma linha da aba
+                tem o mesmo nome: {naoEncontrados.join(", ")}.
+              </p>
+            )}
+          </>
+        )}
       </section>
       <div className="summaryGrid">
         <Metric label="Produtos" value={rows.length} />
@@ -2037,6 +2133,7 @@ function StockScreen({ products, onSync }) {
                 <p>{product.categoriaOperacional}{numberValue(product.parStock) ? ` · Mínimo ${numberValue(product.parStock)}` : ""}</p>
                 {level === "zerado" && <span className="status alert">Estoque zerado</span>}
                 {level === "baixo" && <span className="status warn">Abaixo do mínimo</span>}
+                {product.semLinha && <span className="status warn">Sem linha na planilha</span>}
               </div>
               <strong className="stockQty">{product.estoque} {product.unidade}</strong>
             </article>
@@ -2046,9 +2143,6 @@ function StockScreen({ products, onSync }) {
     </main>
   );
 }
-
-// Converte um produto do app para a linha da aba PRODUTOS. É aqui que a
-// unidade vira fixa (correção 3 do item 9): destilado é garrafa sempre, e a
 // conversão para dose fica na ficha técnica, não na contagem.
 function paraCatalogo(product) {
   const categoria = getOperationalCategory(product);
@@ -2220,24 +2314,46 @@ function quantidadeLegivel(valor, unidade) {
   return `${roundCount(valor)} ${unidade}`;
 }
 
-// Bloco recolhível. Fechado mostra só ícone, nome e quantos itens tem —
-// aberto mostra a lista. Na bancada quase sempre interessa um bloco de cada
-// vez, então tudo nasce fechado menos o primeiro.
-function BlocoDobravel({ icone, titulo, itens, aberto, onToggle, render }) {
+// Ladrilho do resultado: ícone, nome e o número que resume o bloco. A lista
+// inteira só aparece quando a pessoa toca. Na bancada interessa um bloco de
+// cada vez, e quatro listas abertas ao mesmo tempo viram rolagem — por isso
+// o conteúdo mora num modal, não numa sanfona que empurra o resto da tela.
+function PainelCalc({ icone, titulo, resumo, itens, onAbrir }) {
+  const vazio = !itens.length;
   return (
-    <section className={`bloco ${aberto ? "aberto" : ""}`}>
-      <button type="button" className="blocoHead" onClick={onToggle}>
-        <span className="blocoIcone" aria-hidden="true">{icone}</span>
-        <strong>{titulo}</strong>
-        <span className="blocoContador">{itens.length}</span>
-        <span className="blocoSeta" aria-hidden="true">{aberto ? "▾" : "▸"}</span>
-      </button>
-      {aberto && (
-        itens.length
-          ? <div className="blocoLista">{itens.map(render)}</div>
-          : <p className="blocoVazio">nada aqui</p>
-      )}
-    </section>
+    <button type="button" className={`calcTile ${vazio ? "vazio" : ""}`} onClick={onAbrir} disabled={vazio}>
+      <span className="calcTileIcone" aria-hidden="true">{icone}</span>
+      <span className="calcTileContador">{itens.length}</span>
+      <span className="calcTileNome">{titulo}</span>
+      <span className="calcTileResumo">{vazio ? "nada aqui" : resumo}</span>
+    </button>
+  );
+}
+
+// Modal de conteúdo. Fecha no Esc, no fundo e no X; devolve o foco e trava a
+// rolagem de trás enquanto está aberto.
+function Modal({ titulo, onFechar, children }) {
+  useEffect(() => {
+    const aoTeclar = (evento) => { if (evento.key === "Escape") onFechar(); };
+    window.addEventListener("keydown", aoTeclar);
+    const rolagem = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", aoTeclar);
+      document.body.style.overflow = rolagem;
+    };
+  }, [onFechar]);
+
+  return (
+    <div className="modalFundo" onClick={onFechar}>
+      <div className="modalPainel" role="dialog" aria-modal="true" aria-label={titulo} onClick={(evento) => evento.stopPropagation()}>
+        <header className="modalTopo">
+          <strong>{titulo}</strong>
+          <button type="button" className="modalFechar" onClick={onFechar} aria-label="Fechar">×</button>
+        </header>
+        <div className="modalCorpo">{children}</div>
+      </div>
+    </div>
   );
 }
 
@@ -2398,7 +2514,8 @@ function PreBatchScreen({ onNotify }) {
   const [erro, setErro] = useState("");
   const [lista, setLista] = useState({});
   const [gerandoPdf, setGerandoPdf] = useState(false);
-  const [abertos, setAbertos] = useState({ produzir: true, producoes: true, estoque: true, insumos: true });
+  // Nenhum painel nasce aberto: a tela abre com o resumo, não com as listas.
+  const [aberto, setAberto] = useState(null);
 
   async function carregar() {
     setCarregando(true);
@@ -2464,7 +2581,67 @@ function PreBatchScreen({ onNotify }) {
   const itens = useMemo(itensProduziveis, []);
   const escolhidos = itens.filter((item) => lista[item.chave] > 0).length;
 
-  const alternar = (chave) => setAbertos((atual) => ({ ...atual, [chave]: !atual[chave] }));
+
+  const somaLitros = (lista, campo) => roundCount(lista.reduce((total, item) => total + item[campo], 0) / 1000);
+
+  const paineis = [
+    {
+      chave: "produzir",
+      icone: "🥃",
+      titulo: "Produzir",
+      itens: galoes,
+      resumo: `${somaLitros(galoes, "ml")} L em galão`,
+      render: (lote) => (
+        <GrupoCalc key={lote.chave} titulo={lote.nome} detalhe={`${emLitros(lote.ml)} L`}>
+          {lote.par ? <p className="grupoNota">par {emLitros(lote.par)} L · validade {validadeDias(lote.chave)} dias</p> : null}
+          {lote.componentes.map((componente) => (
+            <LinhaCalc key={componente.chave} nome={componente.nome} valor={quantidadeLegivel(componente.ml, "ml")} />
+          ))}
+        </GrupoCalc>
+      ),
+    },
+    {
+      chave: "producoes",
+      icone: "🧪",
+      titulo: "Produções",
+      itens: producoesAFazer,
+      resumo: `${somaLitros(producoesAFazer, "produzir")} L de base`,
+      render: (item) => (
+        <LinhaCalc key={item.chave} nome={item.nome} valor={`${emLitros(item.produzir)} L`} detalhe={`${validadeDias(item.chave)}d`} />
+      ),
+    },
+    {
+      chave: "estoque",
+      icone: "🍾",
+      titulo: "Do estoque",
+      itens: plano.separacao,
+      resumo: `${roundCount(plano.separacao.reduce((total, item) => total + item.unidades, 0))} un para subir`,
+      render: (item) => (
+        <LinhaCalc
+          key={item.chave}
+          nome={item.nome}
+          valor={`${item.unidades} ${item.unidadeEstoque}`}
+          detalhe={quantidadeLegivel(item.qtdReceita, item.unidadeReceita)}
+        />
+      ),
+    },
+    {
+      chave: "insumos",
+      icone: "🧂",
+      titulo: "Insumos",
+      itens: plano.insumosBase,
+      resumo: "pesar e medir",
+      render: (item) => (
+        <LinhaCalc
+          key={item.chave}
+          nome={item.nome}
+          valor={quantidadeLegivel(item.qtdReceita, item.unidadeReceita)}
+          detalhe={item.embalagemFechada ? `${item.unidades} ${item.unidadeEstoque}` : ""}
+        />
+      ),
+    },
+  ];
+  const painelAberto = paineis.find((painel) => painel.chave === aberto);
 
   async function baixarChecklist() {
     setGerandoPdf(true);
@@ -2540,73 +2717,21 @@ function PreBatchScreen({ onNotify }) {
         />
       )}
 
-      <div className="calcGrid">
-        <BlocoDobravel
-          icone="🥃"
-          titulo="Produzir"
-          itens={galoes}
-          aberto={Boolean(abertos.produzir)}
-          onToggle={() => alternar("produzir")}
-          render={(lote) => (
-            <GrupoCalc
-              key={lote.chave}
-              titulo={lote.nome}
-              detalhe={`${emLitros(lote.ml)} L`}
-            >
-              {lote.par ? <p className="grupoNota">par {emLitros(lote.par)} L · validade {validadeDias(lote.chave)} dias</p> : null}
-              {lote.componentes.map((componente) => (
-                <LinhaCalc key={componente.chave} nome={componente.nome} valor={quantidadeLegivel(componente.ml, "ml")} />
-              ))}
-            </GrupoCalc>
-          )}
-        />
-
-        <BlocoDobravel
-          icone="🧪"
-          titulo="Produções"
-          itens={producoesAFazer}
-          aberto={Boolean(abertos.producoes)}
-          onToggle={() => alternar("producoes")}
-          render={(item) => (
-            <LinhaCalc key={item.chave} nome={item.nome} valor={`${emLitros(item.produzir)} L`} detalhe={`${validadeDias(item.chave)}d`} />
-          )}
-        />
-
-        <BlocoDobravel
-          icone="🍾"
-          titulo="Do estoque"
-          itens={plano.separacao}
-          aberto={Boolean(abertos.estoque)}
-          onToggle={() => alternar("estoque")}
-          render={(item) => (
-            <LinhaCalc
-              key={item.chave}
-              nome={item.nome}
-              valor={`${item.unidades} ${item.unidadeEstoque}`}
-              detalhe={quantidadeLegivel(item.qtdReceita, item.unidadeReceita)}
-            />
-          )}
-        />
-
-        <BlocoDobravel
-          icone="🧂"
-          titulo="Insumos"
-          itens={plano.insumosBase}
-          aberto={Boolean(abertos.insumos)}
-          onToggle={() => alternar("insumos")}
-          render={(item) => (
-            <LinhaCalc
-              key={item.chave}
-              nome={item.nome}
-              valor={quantidadeLegivel(item.qtdReceita, item.unidadeReceita)}
-              detalhe={item.embalagemFechada ? `${item.unidades} ${item.unidadeEstoque}` : ""}
-            />
-          )}
-        />
+      <div className="calcTiles">
+        {paineis.map((painel) => (
+          <PainelCalc key={painel.chave} {...painel} onAbrir={() => setAberto(painel.chave)} />
+        ))}
       </div>
+
+      {painelAberto && (
+        <Modal titulo={painelAberto.titulo} onFechar={() => setAberto(null)}>
+          {painelAberto.itens.map(painelAberto.render)}
+        </Modal>
+      )}
     </main>
   );
 }
+
 
 // Requisição em duas pernas (Fase 3):
 //
@@ -3438,12 +3563,14 @@ function NumberField({ label, value, onChange }) {
   );
 }
 
-function Select({ label, value, onChange, options }) {
+function Select({ label, value, onChange, options, rotulos }) {
   return (
     <label className="field">
       <span>{label}</span>
       <select value={value} onChange={(event) => onChange(event.target.value)}>
-        {options.map((option) => <option key={option || "empty"} value={option}>{option || "Todos"}</option>)}
+        {options.map((option, indice) => (
+          <option key={option || "empty"} value={option}>{rotulos?.[indice] ?? (option || "Todos")}</option>
+        ))}
       </select>
     </label>
   );
