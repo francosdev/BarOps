@@ -10,6 +10,7 @@ import {
   batchavelForaDaOP,
   coquetelPorId,
   dosesPorGalao,
+  embalagemDe,
   ehIntermediaria,
   fatorPorLitro,
   montadosNaHora,
@@ -73,6 +74,25 @@ ok("todo produzido tem unidade fixa em ml", produzidos.every((p) => p.unidade ==
 ok("par do Negroni em ml", exigidos.find((p) => p.chave === "cq-negroni").minimo, 16000);
 ok("par de serviço do xar. açúcar", exigidos.find((p) => p.chave === "prod-xarope-acucar").minimo, 16000);
 ok("água não vira produto de estoque", exigidos.some((p) => p.chave === "agua"), false);
+
+console.log("\n--- insumo na requisição (26/08/2026) ---");
+// Carlos: a produção pede açúcar e mel pelo mesmo fluxo de qualquer garrafa.
+// Antes `requisitavel` era false para tudo com categoria "Insumos", e a lista
+// da requisição não tinha nenhum deles.
+const insumosExigidos = exigidos.filter((p) => p.categoria === "Insumos");
+ok("insumo é requisitável", insumosExigidos.every((p) => p.requisitavel), true);
+ok("e nenhum deles é produzido", insumosExigidos.some((p) => p.produzido), false);
+
+// O rótulo de embalagem é o que a requisição mostra no lugar da unidade seca.
+ok("açúcar: pacote de 1 kg", embalagemDe("acucar"), "pacote de 1 kg");
+ok("mel: garrafa de 1 L", embalagemDe("mel"), "garrafa de 1 L");
+ok("glucose: bombona de 5 L", embalagemDe("glucose"), "bombona de 5 L");
+ok("gin: garrafa de 750 ml", embalagemDe("tanqueray"), "garrafa de 750 ml");
+// Granel e unidade não ganham "de X": a unidade de estoque já é a medida.
+ok("gengibre a granel fica em kg", embalagemDe("gengibre"), "kg");
+ok("manjericão a granel fica em g", embalagemDe("manjericao"), "g");
+ok("limão continua por unidade", embalagemDe("limao"), "unidade");
+ok("lata sem volume não vira 'lata de 1'", embalagemDe("red-bull"), "lata");
 
 console.log("\n=== TESTE DE ACEITE: saldo zero, par cheio, arredondamento em litro ===");
 const r = explodirCascata({ saldos: {}, arredondamento: "litro" });

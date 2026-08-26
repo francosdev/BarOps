@@ -575,6 +575,9 @@ function normalizeProduct(product, index = 0) {
     categoria: product.categoria || "Insumos",
     tipoContagem: product.tipoContagem === "garrafa" ? "garrafa" : "unidade",
     unidade: product.unidade || (product.tipoContagem === "garrafa" ? "garrafas" : "un"),
+    // Tamanho da embalagem, quando a ficha sabe: "garrafa de 1 L". Produto
+    // que veio da planilha não tem, e aí a requisição mostra só a unidade.
+    embalagem: product.embalagem || "",
     setores: Array.isArray(product.setores) && product.setores.length ? product.setores : BARS,
     origemPlanilha: product.origemPlanilha || "MVP",
     fornecedor: product.fornecedor || "",
@@ -611,6 +614,7 @@ function fichaProductSeeds(existentes) {
       categoria: exigido.categoria,
       tipoContagem: "unidade",
       unidade: exigido.unidade,
+      embalagem: exigido.embalagem,
       setores: ["Cozinha"],
       origemPlanilha: "FICHA_TECNICA",
       fornecedor: "",
@@ -622,7 +626,18 @@ function fichaProductSeeds(existentes) {
 }
 
 function loadProducts() {
-  const oficiais = OFFICIAL_SHEET_PRODUCTS.map(normalizeProduct);
+  // A ficha sabe o tamanho da embalagem; a lista da planilha não. Onde o nome
+  // bate, o produto oficial herda o rótulo — é o que faz a requisição dizer
+  // "pacote de 1 kg" no açúcar em vez de "un". Açúcar, mel, purê e xarope
+  // caramelo já existem na lista oficial, então não são semeados pela ficha:
+  // sem isto ficariam para sempre sem tamanho de embalagem.
+  const embalagemPorNome = new Map(
+    produtosExigidos().map((exigido) => [normalizeMatchName(exigido.nome), exigido.embalagem])
+  );
+  const oficiais = OFFICIAL_SHEET_PRODUCTS.map(normalizeProduct).map((product) => ({
+    ...product,
+    embalagem: product.embalagem || embalagemPorNome.get(normalizeMatchName(product.nome)) || "",
+  }));
   const seeds = [...oficiais, ...fichaProductSeeds(oficiais)];
   const stored = loadJson(STORAGE_KEYS.products, null);
   if (!stored || !Array.isArray(stored) || !stored.length) return seeds;
@@ -646,6 +661,7 @@ function loadProducts() {
       categoria: seed.categoria,
       tipoContagem: seed.tipoContagem,
       unidade: seed.unidade,
+      embalagem: seed.embalagem,
       valorUnitario: seed.valorUnitario,
       valorFardo: seed.valorFardo,
       unidadesPorFardo: seed.unidadesPorFardo,
@@ -3349,7 +3365,8 @@ function NovaRequisicao({ products, user, onPronto }) {
 
   // Filtro sem acento: ninguém digita "tônica" no celular atrás do bar.
   const query = normalizeMatchName(busca);
-  // Só bebida entra em requisição; insumo de produção a produção puxa direto.
+  // Bebida e insumo de produção: desde 26/08/2026 a produção pede açúcar e
+  // mel pelo mesmo fluxo. Fora ficam os produzidos sem par e os inativos.
   const disponiveis = products.filter((p) => p.ativo && p.requisitavel !== false);
   const visiveis = query
     ? disponiveis.filter((p) => normalizeMatchName(p.nome).includes(query))
@@ -3441,7 +3458,7 @@ function NovaRequisicao({ products, user, onPronto }) {
                 {grupo.itens.map((produto) => (
                   <div className="linhaCalc" key={produto.id}>
                     <span>{produto.nome}</span>
-                    <em>{produto.unidade}</em>
+                    <em>{produto.embalagem || produto.unidade}</em>
                     <input
                       className="qtdInline"
                       type="number"

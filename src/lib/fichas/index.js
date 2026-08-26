@@ -1,10 +1,10 @@
 import { COQUETEIS, GALAO_ML, GIN_PADRAO, PLANILHA_DESATUALIZADA, PROIBIDOS_EM_PRE_BATCH, VALIDADE_PRE_BATCH_DIAS } from "./coqueteis.js";
-import { INSUMOS, insumoPorChave, paraUnidadesDeEstoque } from "./insumos.js";
+import { INSUMOS, embalagemDe, insumoPorChave, paraUnidadesDeEstoque } from "./insumos.js";
 import { EM_ABERTO, ROTULOS_COQUETEL, ROTULOS_PRODUCAO, estaEmAberto, pendenciasDe } from "./pendencias.js";
 import { PAR_SERVICO, PRODUCOES } from "./producoes.js";
 
 export { COQUETEIS, PRODUCOES, INSUMOS, PAR_SERVICO, EM_ABERTO, GALAO_ML, GIN_PADRAO, PLANILHA_DESATUALIZADA, VALIDADE_PRE_BATCH_DIAS };
-export { estaEmAberto, insumoPorChave, paraUnidadesDeEstoque };
+export { estaEmAberto, embalagemDe, insumoPorChave, paraUnidadesDeEstoque };
 
 const PRODUCAO_POR_ID = new Map(PRODUCOES.map((producao) => [producao.id, producao]));
 const COQUETEL_POR_ID = new Map(COQUETEIS.map((coquetel) => [coquetel.id, coquetel]));
@@ -264,8 +264,14 @@ export function produtosExigidos() {
       nome: insumo.nome,
       categoria: insumo.categoria,
       unidade: insumo.unidadeEstoque,
+      // Quanto cabe na embalagem, para a requisição dizer o que é "1".
+      embalagem: embalagemDe(insumo.chave),
       minimo: null,
-      requisitavel: insumo.categoria !== "Insumos",
+      // Até 26/08/2026 insumo de produção não era requisitável: a ideia era
+      // que a produção puxasse direto do estoque. Carlos corrigiu — quem
+      // produz pede açúcar e mel pelo mesmo fluxo de qualquer garrafa, e sem
+      // isso a requisição não servia para a produção.
+      requisitavel: true,
       produzido: false,
     }));
 
@@ -274,6 +280,7 @@ export function produtosExigidos() {
     nome: producao.nome,
     categoria: "Produção",
     unidade: "ml",
+    embalagem: "ml",
     minimo: PAR_SERVICO[producao.id] || null,
     requisitavel: true,
     produzido: true,
@@ -284,6 +291,7 @@ export function produtosExigidos() {
     nome: coquetel.nome,
     categoria: "Pré-batch",
     unidade: "ml",
+    embalagem: "ml",
     minimo: coquetel.parLitros * 1000,
     requisitavel: true,
     produzido: true,

@@ -34,7 +34,7 @@ export const INSUMOS = [
 
   // --- Insumos de produção em embalagem -----------------------------------
   { chave: "acucar", nome: "Açúcar", categoria: "Insumos", unidadeReceita: "g", unidadeEstoque: "pacote", volume: 1000, embalagemFechada: true },
-  { chave: "mel", nome: "Mel", categoria: "Insumos", unidadeReceita: "ml", unidadeEstoque: "pote", volume: 1000, embalagemFechada: true },
+  { chave: "mel", nome: "Mel", categoria: "Insumos", unidadeReceita: "ml", unidadeEstoque: "garrafa", volume: 1000, embalagemFechada: true },
   { chave: "pure-monin", nome: "Purê de framboesa", categoria: "Insumos", unidadeReceita: "ml", unidadeEstoque: "garrafa", volume: 1000, embalagemFechada: true },
   { chave: "glucose", nome: "Glucose", categoria: "Insumos", unidadeReceita: "ml", unidadeEstoque: "bombona", volume: 5000, embalagemFechada: true },
   { chave: "xarope-caramelo-salgado", nome: "Xarope caramelo salgado", categoria: "Insumos", unidadeReceita: "ml", unidadeEstoque: "garrafa", volume: 700, embalagemFechada: true },
@@ -66,6 +66,29 @@ const PORCHAVE = new Map(INSUMOS.map((insumo) => [insumo.chave, insumo]));
 
 export function insumoPorChave(chave) {
   return PORCHAVE.get(chave) || null;
+}
+
+/**
+ * Como a embalagem se chama e quanto cabe nela: "garrafa de 1 L", "pacote de
+ * 1 kg". É o que a pessoa precisa ler na requisição — "1 pacote" sozinho não
+ * diz se é meio quilo ou cinco.
+ *
+ * Granel e o que se pede por unidade não ganham rótulo: nesses a unidade de
+ * estoque já É a medida, e "kg de 1 kg" não ajuda ninguém.
+ */
+export function embalagemDe(chave) {
+  const insumo = insumoPorChave(chave);
+  if (!insumo) return "";
+  const { unidadeEstoque, unidadeReceita, volume, embalagemFechada } = insumo;
+  if (!embalagemFechada || volume <= 1 || unidadeEstoque === "unidade" || unidadeEstoque === unidadeReceita) {
+    return unidadeEstoque;
+  }
+  const medida = unidadeReceita === "ml" && volume >= 1000
+    ? `${volume / 1000} L`
+    : unidadeReceita === "g" && volume >= 1000
+      ? `${volume / 1000} kg`
+      : `${volume} ${unidadeReceita}`;
+  return `${unidadeEstoque} de ${medida}`;
 }
 
 /**
