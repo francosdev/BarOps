@@ -123,30 +123,40 @@ const SETOR_ORIGEM = {
   Estoque: "ESTOQUE",
 };
 
-// Linhas da planilha "NOVA QUARTA 24/06" retiradas do app: repetidas (o
-// produto já existe com o nome completo) ou descontinuadas. Os IDs dos
-// produtos são posicionais, então as linhas continuam na lista e são
-// filtradas depois de gerar os IDs — removê-las da lista deslocaria os IDs
-// de todos os produtos seguintes.
-const REMOVED_SHEET_PRODUCT_IDS = new Set([
-  "sheet-24-06-59", // "Água" → já existe "Água 510ml"
-  "sheet-24-06-60", // "Budweiser" → já existe "Cerveja Budweiser"
-  "sheet-24-06-61", // "Corona" → já existe "Cerveja Corona"
-  "sheet-24-06-62", // "coca cola" → já existe "Refrigerante Coca-Cola"
-  "sheet-24-06-63", // "Corona zero" → já existe "Cerveja Corona Zero"
-  "sheet-24-06-44", // "Xarope de mel" — descontinuado
-  "sheet-24-06-45", // "Purê diluído Framboesa" — descontinuado
-  "sheet-24-06-46", // "Xarope Açúcar" — descontinuado
-  "sheet-24-06-47", // "Xarope manjericao" — descontinuado
-  "sheet-24-06-64", // "tequila" — descontinuado
-  "sheet-24-06-65", // "Alec tonic" — descontinuado
-  "sheet-24-06-66", // "Martini Rosato" — descontinuado
-  "sheet-24-06-67", // "Ramazzoti" — descontinuado
-  "sheet-24-06-68", // "Xarope Gengibre" — descontinuado
-  "sheet-24-06-69", // "xarope toranja" — descontinuado
-  "sheet-24-06-70", // "Xarope Cranberry" — descontinuado
-  "sheet-24-06-71", // "xarope grenade" — descontinuado
-]);
+// Produtos que saíram do catálogo: repetidos (o produto já existe com o nome
+// completo) ou descontinuados.
+//
+// Por NOME, não por índice. Os IDs são posicionais (sheet-24-06-N, com
+// N = posição + 1) e essa conta de mais-um já me fez marcar o Aperol para
+// remoção quando a intenção era o Absolut Tabasco. Nome não tem off-by-one.
+//
+// A comparação é do nome inteiro, normalizado: "Corona" sai e "Cerveja
+// Corona" fica, porque são nomes diferentes e não um contém o outro.
+const REMOVED_SHEET_PRODUCT_NAMES = new Set([
+  "Água",
+  "Budweiser",
+  "Corona",
+  "coca cola",
+  "Corona zero",
+  "Xarope de mel",
+  "Purê diluído Framboesa",
+  "Xarope Açúcar",
+  "Xarope manjericao",
+  "tequila",
+  "Alec tonic",
+  "Martini Rosato",
+  "Ramazzoti",
+  "Xarope Gengibre",
+  "xarope toranja",
+  "Xarope Cranberry",
+  "xarope grenade",
+  "Absolut Tabasco",
+].map(normalizeMatchName));
+
+function produtoRemovidoDoCatalogo(product) {
+  return REMOVED_SHEET_PRODUCT_NAMES.has(normalizeMatchName(product.nome));
+}
+
 
 const OFFICIAL_SHEET_PRODUCTS = [
   ["Açúcar", 50, ""],
@@ -231,7 +241,7 @@ const OFFICIAL_SHEET_PRODUCTS = [
   fornecedor,
   parStock,
   ativo: true,
-})).filter((product) => !REMOVED_SHEET_PRODUCT_IDS.has(product.id));
+})).filter((product) => !produtoRemovidoDoCatalogo(product));
 
 const PARSTOCK_PRODUCTS = [
   ["Gin Tanqueray", "Gin", "garrafa", "garrafas", 37.3],
@@ -647,7 +657,7 @@ function loadProducts() {
     .map(normalizeProduct)
     // Descarta produtos removidos do catálogo já salvos em dispositivos,
     // exceto se o usuário os editou manualmente (aí a remoção fica a critério dele).
-    .filter((product) => !REMOVED_SHEET_PRODUCT_IDS.has(product.id) || product.editadoManualmente)
+    .filter((product) => !produtoRemovidoDoCatalogo(product) || product.editadoManualmente)
     .map((product) => {
     storedIds.add(product.id);
     const seed = seedsById.get(product.id);
@@ -1066,15 +1076,15 @@ function semParenteseFinal(value) {
  * bebida recebendo contagem de taça. Nome que não bate agora volta como não
  * encontrado, e a tela lista para a pessoa corrigir na planilha.
  */
-function matchSheetQuantity(sheetItems, productName, basesAmbiguas) {
+function acharLinhaDaPlanilha(sheetItems, productName, basesAmbiguas) {
   const target = normalizeMatchName(productName);
   const exact = sheetItems.find((item) => item.norm === target);
-  if (exact) return exact.quantidade;
+  if (exact) return exact;
 
   const alvo = apenasAlfanumerico(productName);
   const iguais = sheetItems.filter((item) => item.alfa && item.alfa === alvo);
   // Empate é ambiguidade: duas linhas com o mesmo nome não decidem nada.
-  if (iguais.length === 1) return iguais[0].quantidade;
+  if (iguais.length === 1) return iguais[0];
 
   // Terceiro e último nível: o parêntese final. O catálogo escreve
   // "Copo alto (long drink)" e a planilha escreve "Copo alto" — mesma coisa,
@@ -1084,7 +1094,7 @@ function matchSheetQuantity(sheetItems, productName, basesAmbiguas) {
   const base = semParenteseFinal(productName);
   if (!base || basesAmbiguas?.has(base)) return undefined;
   const porBase = sheetItems.filter((item) => item.base && item.base === base);
-  return porBase.length === 1 ? porBase[0].quantidade : undefined;
+  return porBase.length === 1 ? porBase[0] : undefined;
 }
 
 function buildCountReportRows(inventory, products) {
@@ -1203,10 +1213,9 @@ function App() {
     setScreen("login");
   }
 
-  // Categorias que a casa PRODUZ. Nunca aparecem na aba de compra, e marcá-las
+  // Categorias que a casa PRODUZ nunca aparecem na aba de compra, e marcá-las
   // como "sem linha na planilha" seria acusar de erro o que está certo — o
   // saldo delas mora em MOVIMENTOS.
-  const CATEGORIAS_PRODUZIDAS = ["Produção", "Pré-batch"];
 
   /**
    * Escolhe a coluna quando ninguém escolheu ainda.
@@ -1229,11 +1238,19 @@ function App() {
   async function syncStockFromSheet(sheetName, coluna) {
     const grade = await fetchSheetStock(sheetName);
     const indice = coluna ?? grade.colunaLegado ?? colunaDeFechamento(grade) ?? grade.colunaPadrao ?? 1;
+    // O mínimo também mora na planilha, numa coluna própria. O do app é uma
+    // lista de junho e já estava velha: com ela, Absolut Tabasco e Vinho
+    // Garcia tinto ficavam de fora do pedido com mínimo zero, enquanto a
+    // planilha mandava comprar os dois.
+    const colunaMinimo = (grade.cabecalhos || [])
+      .find((cabecalho) => /minim/.test(normalizeMatchName(cabecalho.nome)))?.indice ?? null;
+
     const sheetItems = grade.linhas.map((linha) => ({
       norm: normalizeMatchName(linha.produto),
       alfa: apenasAlfanumerico(linha.produto),
       base: semParenteseFinal(linha.produto),
       quantidade: numberValue(linha.valores[indice]),
+      minimo: colunaMinimo === null ? null : linha.valores[colunaMinimo],
       temValor: linha.valores[indice] !== null && linha.valores[indice] !== undefined,
     })).filter((item) => item.temValor);
 
@@ -1250,13 +1267,18 @@ function App() {
     let updated = 0;
     const next = products.map((product) => {
       if (!product.ativo) return product;
-      const quantidade = matchSheetQuantity(sheetItems, product.nome, basesAmbiguas);
-      if (quantidade === undefined) {
+      const linha = acharLinhaDaPlanilha(sheetItems, product.nome, basesAmbiguas);
+      if (!linha) {
         if (!CATEGORIAS_PRODUZIDAS.includes(product.categoria)) naoEncontrados.push(product.nome);
         return product;
       }
       updated += 1;
-      return { ...product, estoqueAtual: roundCount(quantidade) };
+      const atualizado = { ...product, estoqueAtual: roundCount(linha.quantidade) };
+      // Produto que a pessoa editou à mão mantém o mínimo dela.
+      if (linha.minimo !== null && linha.minimo !== undefined && !product.editadoManualmente) {
+        atualizado.parStock = roundCount(linha.minimo);
+      }
+      return atualizado;
     });
     setProducts(next);
     return { updated, total: sheetItems.length, naoEncontrados, grade, indice };
@@ -2422,6 +2444,208 @@ function IntegrationScreen({ integration, onChange, products, onNotify }) {
   );
 }
 
+// Produção e pré-batch saem de uma ordem de produção, não de compra: nunca
+// entram num pedido, mesmo tendo mínimo definido (o par).
+const CATEGORIAS_PRODUZIDAS = ["Produção", "Pré-batch"];
+
+/**
+ * O que falta para cada produto voltar ao mínimo — a mesma conta que a coluna
+ * COMPRAR da ESTOQUE GERAL faz: mínimo menos o que tem. Aqui ela sai pronta
+ * para virar pedido, com a quantidade também em embalagem de compra.
+ *
+ * Só entra quem tem mínimo cadastrado: sem mínimo não há como dizer que falta.
+ * Quem está no mínimo ou acima fica de fora.
+ */
+function itensParaCompra(products) {
+  return products
+    .filter((product) => (
+      product.ativo &&
+      !product.produzido &&
+      !CATEGORIAS_PRODUZIDAS.includes(product.categoria)
+    ))
+    .map((product) => {
+      const minimo = numberValue(product.parStock);
+      const estoque = numberValue(product.estoqueAtual);
+      const porPack = defaultUnitsPerPack(product);
+      const faltam = roundCount(minimo - estoque);
+      return {
+        nome: product.nome,
+        fornecedor: String(product.fornecedor || "").trim() || "Sem fornecedor",
+        unidade: product.embalagem || product.unidade,
+        minimo,
+        estoque,
+        faltam,
+        porPack,
+        // Compra-se em fardo/caixa fechada: arredonda para cima.
+        packs: porPack > 1 ? Math.ceil(faltam / porPack) : 0,
+        packNome: packLabel(product),
+        valorUnitario: numberValue(product.valorUnitario),
+      };
+    })
+    .filter((item) => item.minimo > 0 && item.faltam > 0)
+    .sort((a, b) => (
+      a.fornecedor.localeCompare(b.fornecedor, "pt-BR") || a.nome.localeCompare(b.nome, "pt-BR")
+    ));
+}
+
+/**
+ * Pedido de compra em PDF, uma tabela por fornecedor — é assim que o pedido
+ * sai da casa, um para cada representante, e não uma lista única.
+ *
+ * A estimativa de valor usa o preço unitário do catálogo, que nem todo
+ * produto tem; o que não tem sai vazio e não entra no subtotal. O rodapé diz
+ * isso, para ninguém tratar o número como orçamento fechado.
+ */
+async function exportarPedidoCompra(itens, origem) {
+  const { jsPDF } = await import("jspdf");
+  const autoTable = (await import("jspdf-autotable")).default;
+  const doc = new jsPDF();
+  const agora = new Date();
+
+  doc.setFontSize(15);
+  doc.text("Pedido de compra", 14, 16);
+  doc.setFontSize(10);
+  doc.text(`${origem} · ${agora.toLocaleString("pt-BR")}`, 14, 22);
+  doc.text(`${itens.length} item(ns) abaixo do mínimo`, 14, 27);
+
+  let cursor = 35;
+  let totalGeral = 0;
+  let temPreco = false;
+
+  [...new Set(itens.map((item) => item.fornecedor))].forEach((fornecedor) => {
+    const doFornecedor = itens.filter((item) => item.fornecedor === fornecedor);
+    const subtotal = doFornecedor.reduce((total, item) => total + (item.faltam * item.valorUnitario), 0);
+    totalGeral += subtotal;
+    if (subtotal) temPreco = true;
+
+    if (cursor > 235) {
+      doc.addPage();
+      cursor = 20;
+    }
+    doc.setFontSize(11);
+    doc.text(`${fornecedor} · ${doFornecedor.length} item(ns)`, 14, cursor);
+    autoTable(doc, {
+      startY: cursor + 3,
+      head: [["Produto", "Tem", "Mínimo", "Comprar", "Equivale a", "Estimativa"]],
+      body: doFornecedor.map((item) => [
+        item.nome,
+        `${item.estoque}`,
+        `${item.minimo}`,
+        `${item.faltam} ${item.unidade}`,
+        item.packs ? `${item.packs} ${item.packNome} de ${item.porPack}` : "",
+        item.valorUnitario ? `R$ ${(item.faltam * item.valorUnitario).toFixed(2)}` : "",
+      ]),
+      styles: { fontSize: 8.5, cellPadding: 2 },
+      headStyles: { fillColor: [154, 1, 29] },
+      columnStyles: {
+        1: { halign: "right", cellWidth: 16 },
+        2: { halign: "right", cellWidth: 16 },
+        3: { halign: "right", cellWidth: 26 },
+        5: { halign: "right", cellWidth: 24 },
+      },
+      foot: subtotal ? [["", "", "", "", "Subtotal", `R$ ${subtotal.toFixed(2)}`]] : undefined,
+      footStyles: { fillColor: [38, 38, 38], textColor: 235, halign: "right" },
+    });
+    cursor = doc.lastAutoTable.finalY + 9;
+  });
+
+  if (temPreco) {
+    if (cursor > 262) {
+      doc.addPage();
+      cursor = 20;
+    }
+    doc.setFontSize(11);
+    doc.text(`Estimativa total: R$ ${totalGeral.toFixed(2)}`, 14, cursor);
+    doc.setFontSize(8);
+    doc.text("Estimativa pelo preço unitário do catálogo. Item sem preço cadastrado sai em branco e não entra no subtotal.", 14, cursor + 5);
+  }
+
+  doc.save(`pedido-de-compra-${agora.toISOString().slice(0, 10)}.pdf`);
+}
+
+/**
+ * O estoque como ele está, para exportar. Sai tudo que está ativo, na ordem
+ * alfabética — não o que a busca da tela filtrou, senão o relatório sairia
+ * incompleto sem avisar.
+ */
+function linhasDoEstoque(products) {
+  return products
+    .filter((product) => product.ativo)
+    .map((product) => {
+      const estoque = numberValue(product.estoqueAtual);
+      const minimo = numberValue(product.parStock);
+      return {
+        Produto: product.nome,
+        Categoria: getOperationalCategory(product),
+        Estoque: estoque,
+        Unidade: product.embalagem || product.unidade,
+        "Mínimo": minimo || "",
+        "Falta para o mínimo": minimo && estoque < minimo ? roundCount(minimo - estoque) : "",
+        "Situação": estoque <= 0 ? "Zerado" : (minimo && estoque < minimo ? "Abaixo do mínimo" : "OK"),
+        Fornecedor: product.fornecedor || "",
+      };
+    })
+    .sort((a, b) => a.Produto.localeCompare(b.Produto, "pt-BR"));
+}
+
+function nomeDoArquivoDeEstoque(extensao) {
+  return `estoque-${new Date().toISOString().slice(0, 10)}.${extensao}`;
+}
+
+async function exportarEstoqueXlsx(products, origem) {
+  const XLSX = await import("xlsx");
+  const rows = linhasDoEstoque(products);
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  worksheet["!cols"] = [{ wch: 34 }, { wch: 22 }, { wch: 10 }, { wch: 18 }, { wch: 10 }, { wch: 18 }, { wch: 18 }, { wch: 14 }];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Estoque");
+  // A origem vai numa aba própria: quem abrir o arquivo semanas depois
+  // precisa saber de que aba e de que coluna aquele número saiu.
+  const origemSheet = XLSX.utils.json_to_sheet([{ Origem: origem, "Gerado em": new Date().toLocaleString("pt-BR") }]);
+  XLSX.utils.book_append_sheet(workbook, origemSheet, "Origem");
+  XLSX.writeFile(workbook, nomeDoArquivoDeEstoque("xlsx"));
+}
+
+async function exportarEstoquePdf(products, origem) {
+  const { jsPDF } = await import("jspdf");
+  const autoTable = (await import("jspdf-autotable")).default;
+  const doc = new jsPDF();
+  const rows = linhasDoEstoque(products);
+  const zerados = rows.filter((row) => row["Situação"] === "Zerado").length;
+  const baixos = rows.filter((row) => row["Situação"] === "Abaixo do mínimo").length;
+
+  doc.setFontSize(15);
+  doc.text("Estoque atual", 14, 16);
+  doc.setFontSize(10);
+  doc.text(`${origem} · ${new Date().toLocaleString("pt-BR")}`, 14, 22);
+  doc.text(`${rows.length} produto(s) · ${zerados} zerado(s) · ${baixos} abaixo do mínimo`, 14, 27);
+
+  autoTable(doc, {
+    startY: 33,
+    head: [["Produto", "Categoria", "Estoque", "Unidade", "Mínimo", "Falta", "Situação"]],
+    body: rows.map((row) => [
+      row.Produto, row.Categoria, row.Estoque, row.Unidade, row["Mínimo"], row["Falta para o mínimo"], row["Situação"],
+    ]),
+    styles: { fontSize: 8, cellPadding: 1.8 },
+    headStyles: { fillColor: [154, 1, 29] },
+    columnStyles: {
+      2: { halign: "right", cellWidth: 16 },
+      4: { halign: "right", cellWidth: 16 },
+      5: { halign: "right", cellWidth: 14 },
+    },
+    // Linha em falta fica marcada: um relatório de estoque é lido para
+    // achar o que está faltando, não para ler os 70 de cima a baixo.
+    didParseCell: (data) => {
+      if (data.section !== "body") return;
+      const situacao = rows[data.row.index]["Situação"];
+      if (situacao === "Zerado") data.cell.styles.textColor = [154, 1, 29];
+      else if (situacao === "Abaixo do mínimo") data.cell.styles.textColor = [150, 100, 20];
+    },
+  });
+
+  doc.save(nomeDoArquivoDeEstoque("pdf"));
+}
+
 // Estoque atual é espelho da planilha, não um número que o app inventa. A
 // referência é a aba ESTOQUE GERAL na coluna do fechamento de domingo; a
 // coluna fica na configuração porque o cabeçalho varia de planilha para
@@ -2437,6 +2661,7 @@ function StockScreen({ products, integration, onIntegrationChange, onSync, onNot
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState("");
   const [verFaltantes, setVerFaltantes] = useState(false);
+  const [exportando, setExportando] = useState("");
   const query = search.trim().toLowerCase();
 
   async function syncNow(aba = sheetName, indice = coluna) {
@@ -2498,6 +2723,24 @@ function StockScreen({ products, integration, onIntegrationChange, onSync, onNot
   const lowCount = rows.filter((product) => stockLevel(product) === "baixo").length;
   const emptyCount = rows.filter((product) => stockLevel(product) === "zerado").length;
   const colunas = grade?.cabecalhos || [];
+  // O pedido e os relatórios olham o catálogo inteiro, não o que a busca da
+  // tela filtrou: pedido que some com item por causa de um filtro digitado
+  // é pior do que pedido nenhum.
+  const compras = useMemo(() => itensParaCompra(products), [products]);
+  const nomeColuna = grade?.cabecalhos?.[coluna]?.nome || (coluna === null ? "" : `coluna ${coluna + 1}`);
+  const origem = `${sheetName}${nomeColuna ? ` · ${nomeColuna}` : ""}`;
+
+  async function exportar(tarefa, rotulo) {
+    setExportando(rotulo);
+    try {
+      await tarefa();
+      onNotify(`${rotulo} gerado.`);
+    } catch (error) {
+      onNotify(error.message || `Falha ao gerar ${rotulo.toLowerCase()}.`);
+    } finally {
+      setExportando("");
+    }
+  }
   const [teto, mostrarMais] = useTeto(rows.length);
   const visiveis = rows.slice(0, teto);
 
@@ -2544,7 +2787,32 @@ function StockScreen({ products, integration, onIntegrationChange, onSync, onNot
         <Metric label="Produtos" value={rows.length} />
         <Metric label="Zerados" value={emptyCount} />
         <Metric label="Abaixo do mínimo" value={lowCount} />
+        <Metric label="No pedido" value={compras.length} />
       </div>
+
+      <section className="panel stack">
+        <p className="label">Gerar documento</p>
+        <div className="bottomActions inline">
+          <Button
+            onClick={() => exportar(() => exportarPedidoCompra(compras, origem), "Pedido de compra")}
+            disabled={!compras.length || Boolean(exportando)}
+          >
+            {exportando === "Pedido de compra" ? "Gerando..." : `Pedido de compra (${compras.length})`}
+          </Button>
+          <button className="ghostButton" disabled={Boolean(exportando)} onClick={() => exportar(() => exportarEstoquePdf(products, origem), "Estoque em PDF")}>
+            Estoque · PDF
+          </button>
+          <button className="ghostButton" disabled={Boolean(exportando)} onClick={() => exportar(() => exportarEstoqueXlsx(products, origem), "Estoque em Excel")}>
+            Estoque · Excel
+          </button>
+        </div>
+        <p className="miniText">
+          {compras.length
+            ? `O pedido junta ${compras.length} item(ns) abaixo do mínimo, agrupados por fornecedor. Produção e pré-batch ficam de fora — saem de OP, não de compra.`
+            : "Nenhum produto abaixo do mínimo: não há o que pedir."}
+        </p>
+      </section>
+
       <Input label="Buscar produto" value={search} onChange={setSearch} placeholder="Digite o nome" />
       <div className="quickFilters">
         {[
