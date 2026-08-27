@@ -26,7 +26,12 @@ g.garantirAba(ss, "PRODUTOS");
 ss.getSheetByName("PRODUTOS").appendRow(["p-gin", "Gin Tanqueray", "Gin", "garrafa", 12, "caixa", "FRONT", 10, true, true, false]);
 g.garantirAba(ss, "MOVIMENTOS");
 
-const HOJE = "2026-08-26";
+// Datas relativas ao dia em que o teste roda. Fixar "2026-08-26" fazia a
+// suíte quebrar sozinha no dia seguinte: a execução "de hoje" passava de 24h
+// e a expiração — corretamente — a marcava como EXPIRADA.
+const diaRelativo = (dias) => new Date(Date.now() + dias * 86400000).toISOString().slice(0, 10);
+const HOJE = diaRelativo(0);
+const TRES_DIAS_ATRAS = diaRelativo(-3);
 console.log("--- seed ---");
 const boot = g.rotaChkBootstrap({ usuario: "carlos" });
 ok("bootstrap cria os 6 templates do escopo", boot.criados, 6);
@@ -95,7 +100,7 @@ ok("Daniel só enxerga os dele", g.rotaChkListarMeus({ usuario: "daniel", data: 
 ok("Carlos enxerga todos", g.rotaChkListarMeus({ usuario: "carlos", data: HOJE }).checklists.length, 6);
 
 console.log("\n--- 7. expiração ---");
-const exeVelha = g.rotaChkAbrirExecucao({ template_id: String(tplSarah.template_id), data: "2026-08-23", usuario: "sarah" }).execucaoId;
+const exeVelha = g.rotaChkAbrirExecucao({ template_id: String(tplSarah.template_id), data: TRES_DIAS_ATRAS, usuario: "sarah" }).execucaoId;
 ok("expiração marca a de 3 dias atrás", g.chkExpirarAbertas() >= 1, true);
 const velha = g.lerAba(ss, "CHK_EXECUCOES").filter((e) => String(e.execucao_id) === exeVelha)[0];
 ok("status virou EXPIRADA", String(velha.status), "EXPIRADA");
@@ -103,13 +108,13 @@ ok("expirada não aceita resposta", g.rotaChkResponderItem({ execucao_id: exeVel
 ok("a de hoje continua como estava", String(g.lerAba(ss, "CHK_EXECUCOES").filter((e) => String(e.execucao_id) === exeSarah)[0].status), "ABERTA");
 
 console.log("\n--- 8. relatório bate com a contagem manual ---");
-const rel = g.rotaChkRelatorio({ usuario: "carlos", data_inicio: "2026-08-20", data_fim: "2026-08-27" });
+const rel = g.rotaChkRelatorio({ usuario: "carlos", data_inicio: diaRelativo(-7), data_fim: diaRelativo(1) });
 const execs = g.lerAba(ss, "CHK_EXECUCOES");
 const concluidasReais = execs.filter((e) => String(e.status) === "CONCLUIDA").length;
 const expiradasReais = execs.filter((e) => String(e.status) === "EXPIRADA").length;
 ok("soma de concluídas bate", rel.pessoas.reduce((t, p) => t + p.concluidas, 0), concluidasReais);
 ok("soma de expiradas bate", rel.pessoas.reduce((t, p) => t + p.expiradas, 0), expiradasReais);
-ok("relatório é só do admin", g.rotaChkRelatorio({ usuario: "jon", data_inicio: "2026-08-20", data_fim: "2026-08-27" }).ok, false);
+ok("relatório é só do admin", g.rotaChkRelatorio({ usuario: "jon", data_inicio: diaRelativo(-7), data_fim: diaRelativo(1) }).ok, false);
 ok("painel é só do admin", g.rotaChkPainel({ usuario: "jon", data: HOJE }).ok, false);
 ok("painel do admin lista o dia", g.rotaChkPainel({ usuario: "carlos", data: HOJE }).celulas.length, 6);
 
