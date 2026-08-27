@@ -118,16 +118,5 @@ ok("relatório é só do admin", g.rotaChkRelatorio({ usuario: "jon", data_inici
 ok("painel é só do admin", g.rotaChkPainel({ usuario: "jon", data: HOJE }).ok, false);
 ok("painel do admin lista o dia", g.rotaChkPainel({ usuario: "carlos", data: HOJE }).celulas.length, 6);
 
-console.log("\n--- mural ---");
-ok("aviso curto demais é recusado", g.rotaMuralCriar({ usuario: "daniel", texto: "oi" }).ok, false);
-const av = g.rotaMuralCriar({ usuario: "daniel", texto: "Faltou copo alto no bar 23" });
-ok("qualquer usuário deixa recado", av.ok, true);
-ok("aparece na lista", g.rotaMuralListar({}).avisos.length, 1);
-g.rotaMuralResolver({ aviso_id: av.avisoId, usuario: "jon" });
-ok("resolvido some da lista padrão", g.rotaMuralListar({}).avisos.length, 0);
-ok("mas continua no histórico", g.rotaMuralListar({ incluirResolvidos: true }).avisos.length, 1);
-ok("com quem resolveu", g.rotaMuralListar({ incluirResolvidos: true }).avisos[0].resolvidoPor, "jon");
-ok("resolver não cria linha nova", linhas("MURAL"), 1);
-
 console.log(falhas ? `\n${falhas} FALHA(S)` : "\nFASE 5 — 8 TESTES DE ACEITE PASSARAM");
 process.exit(falhas ? 1 : 0);

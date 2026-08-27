@@ -7,7 +7,8 @@
     "test:fichas": "node src/lib/fichas/fichas.test.mjs",
     "test:checklists": "node google-apps-script/testes/checklists.test.mjs",
     "test:avisos": "node google-apps-script/testes/avisos-requisicao.test.mjs",
-    "test": "npm run test:fichas && npm run test:checklists && npm run test:avisos"
+    "test:mural": "node google-apps-script/testes/mural.test.mjs",
+    "test": "npm run test:fichas && npm run test:checklists && npm run test:avisos && npm run test:mural"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",

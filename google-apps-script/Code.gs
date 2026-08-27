@@ -38,7 +38,10 @@ const CABECALHOS = {
   CHK_ITENS: ["item_id", "template_id", "ordem", "descricao", "tipo_evidencia", "referencia", "obrigatorio", "ativo"],
   CHK_EXECUCOES: ["execucao_id", "template_id", "data", "local", "usuario", "status", "iniciado_em", "concluido_em"],
   CHK_RESPOSTAS: ["resposta_id", "execucao_id", "item_id", "valor", "usuario", "registrado_em"],
-  MURAL: ["aviso_id", "criado_em", "autor", "texto", "status", "resolvido_por", "resolvido_em"],
+  // Bloco C — mural de recados. Substituiu a aba MURAL da entrega anterior,
+  // que tinha "resolvido" e nunca recebeu uma linha. Recado não se resolve:
+  // ou está no mural, ou o autor tirou.
+  RECADOS: ["recado_id", "autor", "texto", "fixado", "ativo", "criado_em"],
 
   // Bloco D — avisos dentro do app. Canal unico INAPP.
   NOTIFICACOES: ["notif_id", "usuario", "tipo", "titulo", "corpo", "link", "lida", "criada_em"],
@@ -319,9 +322,11 @@ const ROTAS = {
   "chk_painel": rotaChkPainel,
   "chk_relatorio": rotaChkRelatorio,
   "chk_crud_template": rotaChkCrudTemplate,
-  "mural_listar": rotaMuralListar,
-  "mural_criar": rotaMuralCriar,
-  "mural_resolver": rotaMuralResolver,
+  // Bloco C — mural.
+  "recado_listar": rotaRecadoListar,
+  "recado_publicar": rotaRecadoPublicar,
+  "recado_desativar": rotaRecadoDesativar,
+  "recado_fixar": rotaRecadoFixar,
 
   // Bloco D — avisos.
   "notif_listar": rotaNotifListar,
@@ -675,6 +680,8 @@ function rotaRequisicoesCriar(payload) {
       titulo: "Nova requisicao - " + destino,
       corpo: nomeDoUsuario(ss, criadoPor) + " pediu " + linhas.length + " item(ns)",
       link: "/requisicoes/" + reqId,
+      // Salvar a mesma requisicao duas vezes em cinco minutos avisa uma vez.
+      chaveDedup: "/requisicoes/" + reqId,
     });
 
     return { ok: true, reqId, criados: linhas.length, criadoPor: criadoPor, dataOperacional: diaOperacional };
@@ -1298,7 +1305,6 @@ const ABA_CHK_TEMPLATES = "CHK_TEMPLATES";
 const ABA_CHK_ITENS = "CHK_ITENS";
 const ABA_CHK_EXECUCOES = "CHK_EXECUCOES";
 const ABA_CHK_RESPOSTAS = "CHK_RESPOSTAS";
-const ABA_MURAL = "MURAL";
 
 const MOMENTOS_CHK = ["ABERTURA", "PRE_OPERACAO", "FECHAMENTO"];
 const TIPOS_EVIDENCIA = ["TOGGLE", "NUMERO", "TEXTO", "CONTAGEM"];
@@ -1997,84 +2003,6 @@ function chkExpirarAbertas() {
   return expiradas;
 }
 
-// --- Mural -----------------------------------------------------------------
-
-/**
- * Quadro de recados da operacao. Qualquer usuario deixa um recado; qualquer
- * usuario marca como resolvido.
- *
- * Nao tem destinatario, prazo nem dono, e nao entra em relatorio — Carlos
- * pediu em 26/08/2026 "apenas um quadro de recado onde todos podem deixar um
- * recado sobre a operacao", e o escopo da Fase 5 exclui tarefa pontual com
- * prazo e dono de proposito. Recado e recado.
- */
-function rotaMuralListar(payload) {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  garantirAba(ss, ABA_MURAL);
-  const incluirResolvidos = ehVerdadeiro(payload.incluirResolvidos);
-  const avisos = lerAba(ss, ABA_MURAL)
-    .filter(function (a) { return incluirResolvidos || textoDe(a.status) !== "RESOLVIDO"; })
-    .map(function (a) {
-      return {
-        avisoId: textoDe(a.aviso_id), texto: textoDe(a.texto), autor: textoDe(a.autor),
-        status: textoDe(a.status) || "ABERTO",
-        criadoEm: textoDe(a.criado_em), resolvidoPor: textoDe(a.resolvido_por), resolvidoEm: textoDe(a.resolvido_em),
-      };
-    })
-    .sort(function (a, b) { return String(b.criadoEm).localeCompare(String(a.criadoEm)); });
-  return { ok: true, avisos: avisos };
-}
-
-function rotaMuralCriar(payload) {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  const texto = textoDe(payload.texto);
-  const autor = textoDe(payload.usuario).toLowerCase();
-  if (texto.length < 3) return { ok: false, error: "Escreva pelo menos 3 caracteres." };
-  if (!autor) return { ok: false, error: "Informe o usuario." };
-
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {
-    const id = novoId("avs");
-    upsertLinha(ss, ABA_MURAL,
-      function (a) { return textoDe(a.aviso_id) === id; },
-      {
-        aviso_id: id, criado_em: agoraISO(), autor: autor, texto: texto,
-        status: "ABERTO", resolvido_por: "", resolvido_em: "",
-      });
-    return { ok: true, avisoId: id };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function rotaMuralResolver(payload) {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  const avisoId = textoDe(payload.aviso_id);
-  const usuario = textoDe(payload.usuario).toLowerCase();
-  if (!avisoId) return { ok: false, error: "Informe o aviso." };
-
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {
-    const aviso = lerAba(ss, ABA_MURAL).filter(function (a) { return textoDe(a.aviso_id) === avisoId; })[0];
-    if (!aviso) return { ok: false, error: "Aviso nao encontrado." };
-    const reabrir = ehVerdadeiro(payload.reabrir);
-    upsertLinha(ss, ABA_MURAL,
-      function (a) { return textoDe(a.aviso_id) === avisoId; },
-      {
-        aviso_id: avisoId, criado_em: textoDe(aviso.criado_em), autor: textoDe(aviso.autor),
-        texto: textoDe(aviso.texto),
-        status: reabrir ? "ABERTO" : "RESOLVIDO",
-        resolvido_por: reabrir ? "" : usuario,
-        resolvido_em: reabrir ? "" : agoraISO(),
-      });
-    return { ok: true, avisoId: avisoId, status: reabrir ? "ABERTO" : "RESOLVIDO" };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
 /**
  * Acrescenta as colunas novas no cabecalho de uma aba que ja tem dados.
  *
@@ -2170,7 +2098,7 @@ function migrarUsuariosEPapeis() {
  */
 function criarAbasChecklists() {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  [ABA_CHK_TEMPLATES, ABA_CHK_ITENS, ABA_CHK_EXECUCOES, ABA_CHK_RESPOSTAS, ABA_MURAL].forEach(function (aba) {
+  [ABA_CHK_TEMPLATES, ABA_CHK_ITENS, ABA_CHK_EXECUCOES, ABA_CHK_RESPOSTAS, ABA_RECADOS].forEach(function (aba) {
     garantirAba(ss, aba);
   });
 
@@ -2221,7 +2149,7 @@ function rotaChkBootstrap(payload) {
   const negado = exigirAdminChk(ss, payload.usuario);
   if (negado) return negado;
 
-  [ABA_CHK_TEMPLATES, ABA_CHK_ITENS, ABA_CHK_EXECUCOES, ABA_CHK_RESPOSTAS, ABA_MURAL].forEach(function (aba) {
+  [ABA_CHK_TEMPLATES, ABA_CHK_ITENS, ABA_CHK_EXECUCOES, ABA_CHK_RESPOSTAS, ABA_RECADOS].forEach(function (aba) {
     garantirAba(ss, aba);
   });
 
@@ -2324,8 +2252,8 @@ const TIPOS_NOTIFICACAO = [
 // Aviso mais velho que isto some da lista. A linha fica na planilha.
 const DIAS_DE_AVISO = 30;
 
-// Mesma chave em menos disto vira um aviso so. Salvar a requisicao duas vezes
-// seguidas nao pode tocar o sino do Jon duas vezes.
+// Janela da deduplicacao, para quem pedir por chave. Salvar a requisicao duas
+// vezes seguidas nao pode tocar o sino do Jon duas vezes.
 const MINUTOS_DEDUPLICACAO = 5;
 
 /**
@@ -2335,6 +2263,11 @@ const MINUTOS_DEDUPLICACAO = 5;
  * NUNCA lanca. Se a gravacao do aviso falhar, a operacao que a chamou tem que
  * seguir: requisicao gravada sem aviso e um problema pequeno, requisicao
  * perdida por causa do aviso e um problema grande.
+ *
+ * `chaveDedup` e opcional e so quem pede e deduplicado. Antes a deduplicacao
+ * era automatica por (usuario, tipo, link) e isso engolia recado: todo recado
+ * aponta para /mural, entao o segundo em cinco minutos nao avisava ninguem.
+ * Requisicao passa o req_id; recado nao passa nada e todo recado avisa.
  */
 function notificar(opcoes) {
   try {
@@ -2346,6 +2279,7 @@ function notificar(opcoes) {
 
     const tipo = textoDe(opcoes.tipo).toUpperCase();
     const link = textoDe(opcoes.link);
+    const chaveDedup = textoDe(opcoes.chaveDedup);
     const agora = agoraISO();
     const limiteDedup = Date.now() - MINUTOS_DEDUPLICACAO * 60000;
 
@@ -2357,11 +2291,11 @@ function notificar(opcoes) {
       const novas = [];
 
       destinatarios.forEach(function (usuario) {
-        // Deduplicacao por (usuario, tipo, link) dentro da janela.
-        const recente = existentes.some(function (n) {
+        // So deduplica quem pediu, por (usuario, tipo, chave) na janela.
+        const recente = chaveDedup && existentes.some(function (n) {
           if (textoDe(n.usuario).toLowerCase() !== usuario) return false;
           if (textoDe(n.tipo).toUpperCase() !== tipo) return false;
-          if (textoDe(n.link) !== link) return false;
+          if (textoDe(n.link) !== chaveDedup) return false;
           const quando = new Date(textoDe(n.criada_em)).getTime();
           return quando && quando >= limiteDedup;
         });
@@ -2481,6 +2415,185 @@ function rotaNotifMarcarTodasLidas(payload) {
       marcadas += 1;
     });
     return { ok: true, marcadas: marcadas };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ===========================================================================
+// BLOCO C — MURAL DE RECADOS
+//
+// Qualquer um posta, todos são avisados. Sem thread, sem reação, sem resposta
+// e sem destinatário: recado é recado.
+//
+// Substituiu a aba MURAL da entrega anterior, que tinha status de resolvido e
+// nenhuma linha gravada. Duas tabelas para a mesma ideia seria pior.
+// ===========================================================================
+
+const ABA_RECADOS = "RECADOS";
+
+const TAMANHO_MIN_RECADO = 3;
+const TAMANHO_MAX_RECADO = 500;
+
+// Sem limite, um dia ruim vira 40 notificacoes para 5 pessoas.
+const RECADOS_POR_DIA = 10;
+
+// Mural com tudo fixado nao tem topo. Tres e o teto.
+const MAX_FIXADOS = 3;
+
+// Quanto o mural mostra sem pedir mais.
+const DIAS_DE_MURAL = 30;
+
+function recadoPublico(linha) {
+  return {
+    recadoId: textoDe(linha.recado_id),
+    autor: textoDe(linha.autor),
+    texto: textoDe(linha.texto),
+    fixado: ehVerdadeiro(linha.fixado),
+    ativo: ehVerdadeiro(linha.ativo),
+    criadoEm: textoDe(linha.criado_em),
+  };
+}
+
+/**
+ * Feed do mural: fixados no topo, o resto do mais novo para o mais velho.
+ *
+ * Mostra os ultimos 30 dias por padrao. `desde` (YYYY-MM-DD) puxa mais para
+ * tras — e o "carregar mais" da tela.
+ */
+function rotaRecadoListar(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  garantirAba(ss, ABA_RECADOS);
+  const desde = textoDe(payload.desde) ||
+    new Date(Date.now() - DIAS_DE_MURAL * 86400000).toISOString().slice(0, 10);
+
+  const recados = lerAba(ss, ABA_RECADOS)
+    .map(recadoPublico)
+    .filter(function (r) { return r.ativo && String(r.criadoEm).slice(0, 10) >= desde; })
+    .sort(function (a, b) {
+      // Fixado ganha do recente. Entre iguais, o mais novo primeiro.
+      if (a.fixado !== b.fixado) return a.fixado ? -1 : 1;
+      return String(b.criadoEm).localeCompare(String(a.criadoEm));
+    });
+
+  return { ok: true, desde: desde, recados: recados, fixados: recados.filter(function (r) { return r.fixado; }).length };
+}
+
+/**
+ * Publica um recado e avisa todo mundo, menos quem escreveu.
+ *
+ * Recado nao e editavel depois de publicado — correcao e recado novo. Mural
+ * editavel nao serve como registro: quem leu ontem nao leu o que esta escrito
+ * hoje.
+ */
+function rotaRecadoPublicar(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const autor = normalizeLogin(payload.usuario);
+  const texto = textoDe(payload.texto);
+  if (!autor) return { ok: false, error: "Informe o usuario." };
+  if (texto.length < TAMANHO_MIN_RECADO) return { ok: false, error: "Escreva pelo menos " + TAMANHO_MIN_RECADO + " caracteres." };
+  if (texto.length > TAMANHO_MAX_RECADO) {
+    return { ok: false, error: "Recado passou de " + TAMANHO_MAX_RECADO + " caracteres (tem " + texto.length + ")." };
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const hoje = dataOperacional();
+    const doDia = lerAba(ss, ABA_RECADOS).filter(function (r) {
+      return normalizeLogin(r.autor) === autor && dataOperacional(textoDe(r.criado_em)) === hoje;
+    }).length;
+    if (doDia >= RECADOS_POR_DIA) {
+      return { ok: false, error: "Limite de " + RECADOS_POR_DIA + " recados por dia. Junte o que falta num recado so." };
+    }
+
+    const id = novoId("rec");
+    upsertLinha(ss, ABA_RECADOS,
+      function (r) { return textoDe(r.recado_id) === id; },
+      { recado_id: id, autor: autor, texto: texto, fixado: false, ativo: true, criado_em: agoraISO() });
+
+    // Todo mundo menos quem escreveu. notificar() nunca lanca.
+    notificar({
+      destinatarios: usuariosAtivos([autor]),
+      tipo: "RECADO_NOVO",
+      titulo: "Recado de " + nomeDoUsuario(ss, autor),
+      corpo: texto.length > 90 ? texto.slice(0, 90) + "..." : texto,
+      link: "/mural",
+    });
+
+    return { ok: true, recadoId: id, restantesHoje: RECADOS_POR_DIA - doDia - 1 };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Soft delete. Autor tira o proprio; admin tira qualquer um. Linha fica. */
+function rotaRecadoDesativar(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const usuario = normalizeLogin(payload.usuario);
+  const recadoId = textoDe(payload.recado_id);
+  if (!usuario || !recadoId) return { ok: false, error: "Informe o recado e o usuario." };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const recado = lerAba(ss, ABA_RECADOS).filter(function (r) { return textoDe(r.recado_id) === recadoId; })[0];
+    if (!recado) return { ok: false, error: "Recado nao encontrado." };
+    if (normalizeLogin(recado.autor) !== usuario && !ehAdminChk(ss, usuario)) {
+      return { ok: false, error: "So o autor ou o administrador tira um recado do mural.", codigo: 403 };
+    }
+    upsertLinha(ss, ABA_RECADOS,
+      function (r) { return textoDe(r.recado_id) === recadoId; },
+      {
+        recado_id: recadoId, autor: textoDe(recado.autor), texto: textoDe(recado.texto),
+        fixado: false, ativo: false, criado_em: textoDe(recado.criado_em),
+      });
+    return { ok: true, recadoId: recadoId };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Fixa ou desafixa. So admin.
+ *
+ * Teto de tres: ao tentar o quarto, recusa pedindo para desafixar outro em
+ * vez de empurrar o mais antigo sozinho — quem fixou tem que decidir qual sai.
+ */
+function rotaRecadoFixar(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const negado = exigirAdminChk(ss, payload.usuario);
+  if (negado) return negado;
+  const recadoId = textoDe(payload.recado_id);
+  if (!recadoId) return { ok: false, error: "Informe o recado." };
+  const fixar = payload.fixar === undefined ? true : ehVerdadeiro(payload.fixar);
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const todos = lerAba(ss, ABA_RECADOS);
+    const recado = todos.filter(function (r) { return textoDe(r.recado_id) === recadoId; })[0];
+    if (!recado) return { ok: false, error: "Recado nao encontrado." };
+    if (!ehVerdadeiro(recado.ativo)) return { ok: false, error: "Recado desativado nao vai para o topo." };
+
+    const fixadosAgora = todos.filter(function (r) {
+      return ehVerdadeiro(r.fixado) && ehVerdadeiro(r.ativo) && textoDe(r.recado_id) !== recadoId;
+    });
+    if (fixar && fixadosAgora.length >= MAX_FIXADOS) {
+      return {
+        ok: false,
+        error: "Ja existem " + MAX_FIXADOS + " recados fixados. Desafixe um antes de fixar outro.",
+        fixados: fixadosAgora.map(function (r) { return { recadoId: textoDe(r.recado_id), texto: textoDe(r.texto) }; }),
+      };
+    }
+
+    upsertLinha(ss, ABA_RECADOS,
+      function (r) { return textoDe(r.recado_id) === recadoId; },
+      {
+        recado_id: recadoId, autor: textoDe(recado.autor), texto: textoDe(recado.texto),
+        fixado: fixar, ativo: true, criado_em: textoDe(recado.criado_em),
+      });
+    return { ok: true, recadoId: recadoId, fixado: fixar };
   } finally {
     lock.releaseLock();
   }

@@ -75,9 +75,9 @@ ok("badge por tipo para o menu", avisosJon.badges.REQUISICAO_CRIADA, 1);
 ok("Daniel não recebeu nada", g.rotaNotifListar({ usuario: "daniel" }).naoLidas, 0);
 
 // Deduplicação: salvar de novo em menos de 5 min não toca o sino outra vez.
-g.notificar({ destinatarios: ["jon"], tipo: "REQUISICAO_CRIADA", titulo: "x", corpo: "y", link: "/requisicoes/req-teste" });
+g.notificar({ destinatarios: ["jon"], tipo: "REQUISICAO_CRIADA", titulo: "x", corpo: "y", link: "/requisicoes/req-teste", chaveDedup: "/requisicoes/req-teste" });
 ok("segundo aviso igual em 5 min é ignorado", g.rotaNotifListar({ usuario: "jon" }).naoLidas, 1);
-g.notificar({ destinatarios: ["jon"], tipo: "REQUISICAO_CRIADA", titulo: "x", corpo: "y", link: "/requisicoes/outra" });
+g.notificar({ destinatarios: ["jon"], tipo: "REQUISICAO_CRIADA", titulo: "x", corpo: "y", link: "/requisicoes/outra", chaveDedup: "/requisicoes/outra" });
 ok("link diferente vira aviso novo", g.rotaNotifListar({ usuario: "jon" }).naoLidas, 2);
 
 console.log("\n--- D: sino, leitura e resiliência ---");
