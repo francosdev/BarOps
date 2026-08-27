@@ -3904,6 +3904,74 @@ function CardRequisicao({ req, nomeDe, acao, acaoSecundaria, aberto, onToggle })
  * hora da digitação, apagar o campo virava zero e a linha sumia do pedido no
  * meio da edição.
  */
+// Teclas que não existem numa quantidade de requisição. O ponto e a vírgula
+// são os que importam: é deles que saiu a requisição com 12,4 / 12,3 / 12,2
+// que está na produção.
+const TECLAS_PROIBIDAS = [".", ",", "e", "E", "+", "-"];
+
+/** Só dígitos. Usado no onChange e no paste — colar "12,4" vira "124"? Não:
+ *  vira "12" e "4" separados não existem, então o resultado é "124" mesmo, e
+ *  é por isso que a validação do servidor é a que manda. Aqui só evitamos
+ *  digitar o que nunca é válido. */
+function apenasDigitos(texto) {
+  return String(texto ?? "").replace(/\D/g, "");
+}
+
+/**
+ * Campo de quantidade de requisição: inteiro positivo, e só.
+ *
+ * Não existe requisitar meia garrafa — requisição move unidade fechada do
+ * estoque para o bar. Contagem é outra coisa e continua com decimal; este
+ * componente é exclusivo do fluxo de requisição.
+ *
+ * O teclado do celular vem numérico e sem ponto por causa de inputMode e
+ * pattern. type="text" em vez de number de propósito: number aceita "12.4"
+ * em muitos navegadores e ainda esconde o valor inválido em value="".
+ */
+function QuantidadeInteira({ valor, onChange, max, ...resto }) {
+  const [avisou, setAvisou] = useState(false);
+
+  // Bloquear a vírgula em silêncio transforma "2,5" em "25" — um erro de dez
+  // vezes, que é a mesma doença que estamos curando. Bloqueia E avisa: a
+  // pessoa vê o 25 na tela junto com o motivo e corrige.
+  function recusar() {
+    setAvisou(true);
+    window.setTimeout(() => setAvisou(false), 2600);
+  }
+
+  return (
+    <>
+    <input
+      {...resto}
+      className="qtdInline"
+      type="text"
+      inputMode="numeric"
+      pattern="[0-9]*"
+      placeholder="0"
+      value={valor ?? ""}
+      onKeyDown={(evento) => {
+        if (!TECLAS_PROIBIDAS.includes(evento.key)) return;
+        evento.preventDefault();
+        recusar();
+      }}
+      onPaste={(evento) => {
+        evento.preventDefault();
+        const bruto = evento.clipboardData.getData("text");
+        const limpo = apenasDigitos(bruto);
+        if (limpo !== String(bruto).trim()) recusar();
+        if (limpo) onChange(max === undefined ? limpo : String(Math.min(parseInt(limpo, 10), max)));
+      }}
+      onChange={(evento) => {
+        const limpo = apenasDigitos(evento.target.value);
+        if (!limpo) return onChange("");
+        onChange(max === undefined ? limpo : String(Math.min(parseInt(limpo, 10), max)));
+      }}
+    />
+    {avisou && <em className="avisoInteiro">só unidade inteira — confira o número</em>}
+    </>
+  );
+}
+
 function NovaRequisicao({ products, user, onPronto }) {
   const [destino, setDestino] = useState("BAR22");
   const [busca, setBusca] = useState("");
@@ -3926,9 +3994,13 @@ function NovaRequisicao({ products, user, onPronto }) {
     .map((categoria) => ({ categoria, itens: visiveis.filter((p) => getOperationalCategory(p) === categoria) }))
     .filter((grupo) => grupo.itens.length);
 
+  // parseInt, não numberValue: requisição é inteiro, e numberValue aceitaria
+  // "2,5" convertendo para 2.5. O nome vai junto para a mensagem de erro do
+  // servidor poder dizer qual item recusou.
+  const nomePorProduto = new Map(products.map((product) => [product.id, product.nome]));
   const pedido = Object.keys(qtds)
-    .map((id) => ({ id, qtd: numberValue(qtds[id]) }))
-    .filter((item) => item.qtd > 0);
+    .map((id) => ({ id, nome: nomePorProduto.get(id) || id, qtd: parseInt(qtds[id], 10) }))
+    .filter((item) => Number.isInteger(item.qtd) && item.qtd > 0);
 
   function mudar(id, texto) {
     setQtds((atual) => ({ ...atual, [id]: texto }));
@@ -3946,8 +4018,11 @@ function NovaRequisicao({ products, user, onPronto }) {
         reqId: uid("req"),
         destino,
         solicitanteId: user?.id || "",
-        data: today(),
-        itens: pedido.map((item) => ({ produtoId: item.id, qtd: item.qtd })),
+        // Autoria vem da sessão: o servidor grava criado_por com isto e a
+        // data operacional ele mesmo calcula. Nenhum campo de tela escolhe
+        // quem está pedindo.
+        criadoPor: user?.login || "",
+        itens: pedido.map((item) => ({ produtoId: item.id, produto: item.nome, qtd: item.qtd })),
       });
       setQtds({});
       setBusca("");
@@ -4009,14 +4084,9 @@ function NovaRequisicao({ products, user, onPronto }) {
                   <div className="linhaCalc" key={produto.id}>
                     <span>{produto.nome}</span>
                     <em>{produto.embalagem || produto.unidade}</em>
-                    <input
-                      className="qtdInline"
-                      type="number"
-                      min="0"
-                      inputMode="decimal"
-                      placeholder="0"
-                      value={qtds[produto.id] ?? ""}
-                      onChange={(event) => mudar(produto.id, event.target.value)}
+                    <QuantidadeInteira
+                      valor={qtds[produto.id]}
+                      onChange={(valor) => mudar(produto.id, valor)}
                     />
                   </div>
                 ))}
@@ -4066,7 +4136,9 @@ function SepararRequisicao({ requisicao, nomeDe, user, onCancelar, onPronto }) {
         separadorId: user?.id || "",
         itens: requisicao.itens.map((item) => ({
           produtoId: item.produtoId,
-          qtdSeparada: numberValue(qtds[item.produtoId]),
+          // Vazio é zero, que na separação significa recusa por falta. O
+          // resto é inteiro: o servidor recusa fração aqui também.
+          qtdSeparada: parseInt(qtds[item.produtoId], 10) || 0,
         })),
       });
       onPronto(`Separado para ${requisicao.destino}: ${resultado.movimentosGravados} item(ns) baixados. Status ${resultado.status}.`);
@@ -4092,15 +4164,10 @@ function SepararRequisicao({ requisicao, nomeDe, user, onCancelar, onPronto }) {
           <div className="linhaCalc" key={item.produtoId}>
             <span>{nomeDe(item.produtoId)}</span>
             <em>pediu {item.qtdPedida}</em>
-            <input
-              className="qtdInline"
-              type="number"
-              min="0"
+            <QuantidadeInteira
+              valor={qtds[item.produtoId]}
               max={item.qtdPedida}
-              inputMode="decimal"
-              placeholder="0"
-              value={qtds[item.produtoId] ?? ""}
-              onChange={(event) => mudar(item.produtoId, event.target.value, item.qtdPedida)}
+              onChange={(valor) => mudar(item.produtoId, valor, item.qtdPedida)}
             />
           </div>
         ))}

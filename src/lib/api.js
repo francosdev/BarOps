@@ -142,8 +142,12 @@ export async function gravarMovimentos(movimentos) {
 // --- Requisição (Fase 3) ---------------------------------------------------
 
 // Quem precisa monta o pedido. Nada sai do estoque aqui.
-export async function criarRequisicao({ reqId, destino, solicitanteId, data, itens }) {
-  const resultado = await chamarAppsScript({ action: "requisicoes.criar", reqId, destino, solicitanteId, data, itens });
+// `data` não vai daqui de propósito: a data operacional é do servidor, porque
+// antes das 06:00 o movimento pertence ao dia anterior e o relógio do celular
+// não sabe disso. `criadoPor` é o login da sessão — a autoria nunca é escolhida
+// em tela.
+export async function criarRequisicao({ reqId, destino, solicitanteId, criadoPor, itens }) {
+  const resultado = await chamarAppsScript({ action: "requisicoes.criar", reqId, destino, solicitanteId, criadoPor, itens });
   if (resultado.ok === false) throw new Error(resultado.error);
   return resultado;
 }

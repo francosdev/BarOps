@@ -1,7 +1,8 @@
 # Prompt para a extensão do Claude no Chrome
 
-> Deploy de **26/08/2026** — traz duas coisas: a rota `requisicoes.cancelar` e a
-> **Fase 5 inteira** (checklists operacionais + mural). Sai da versão 5 para a 6.
+> Deploy de **27/08/2026** — Fase 5, passos 1 a 4: papéis na tabela de usuários, camada de
+> avisos in-app, validação de inteiro na requisição (bug em produção) e aviso ao separador.
+> Sai da versão 6 para a 7.
 
 ## Como usar
 
@@ -9,7 +10,7 @@
 2. Abra `google-apps-script/Code.gs` no VS Code, `Ctrl+A`, `Ctrl+C`.
 3. Cole na extensão **primeiro o prompt abaixo**, e o código **na mensagem seguinte**.
 
-São ~2.083 linhas.
+São ~2.487 linhas.
 
 ---
 
@@ -36,138 +37,128 @@ Se não for, **pare e me avise**.
 
 ## Regras que não podem ser quebradas
 
-1. **NUNCA crie uma implantação nova.** A URL da implantação atual está gravada dentro do
-   app publicado. Criar uma implantação nova gera outra URL e o app para de funcionar.
-   Você deve **editar a implantação existente** e criar uma **nova versão** dela. A URL tem
-   que continuar contendo
-   `AKfycbwkpfNZz_CAr7viDL8YvFjE2J_o9wyd3gybqrZMyAE94WO3UaUFSKI89gk-srqvEg`.
+1. **NUNCA crie uma implantação nova.** A URL atual está gravada dentro do app publicado.
+   Criar implantação nova gera outra URL e o app para de funcionar. Você deve **editar a
+   implantação existente** e criar uma **nova versão** dela. A URL tem que continuar
+   contendo `AKfycbwkpfNZz_CAr7viDL8YvFjE2J_o9wyd3gybqrZMyAE94WO3UaUFSKI89gk-srqvEg`.
 
 2. **Não altere nenhuma constante do topo do arquivo**, em especial `APP_TOKEN` e
-   `SENHA_SALT`. Mudar o token derruba a conexão com o app; mudar o sal invalida todas as
-   senhas já cadastradas. Cole o código exatamente como recebeu.
+   `SENHA_SALT`. Mudar o token derruba a conexão; mudar o sal invalida todas as senhas.
 
-3. **Substitua o conteúdo inteiro do arquivo** (`Ctrl+A` e cole por cima). Não faça
-   edições parciais — colagem parcial deixa o arquivo com sintaxe quebrada.
+3. **Substitua o conteúdo inteiro do arquivo** (`Ctrl+A` e cole por cima). Colagem parcial
+   deixa o arquivo com sintaxe quebrada.
 
 4. **Não altere "Executar como" nem "Quem pode acessar".** Já estão em "Eu" e "Qualquer
-   pessoa" e devem continuar assim. Se alguma tela exigir confirmar essas opções, **pare e
-   me avise** — esse clique é meu.
+   pessoa". Se alguma tela exigir confirmar essas opções, **pare e me avise**.
 
 5. **Pare e me pergunte** se: o projeto não for o descrito acima, houver mais de uma
-   implantação ativa, aparecer erro de sintaxe ao salvar, ou qualquer função devolver erro.
-   Não tente contornar sozinho.
+   implantação ativa, aparecer erro de sintaxe, ou qualquer função devolver erro.
 
 ## Passo 1 — substituir o código
 
-Clique no editor, `Ctrl+A`, cole o código novo por cima, `Ctrl+S`. Confirme que salvou sem
-erro de sintaxe e me diga quantas linhas o arquivo ficou (esperado: ~2.083).
+`Ctrl+A` no editor, cole o código novo por cima, `Ctrl+S`. Me diga quantas linhas ficou
+(esperado: ~2.487) e se salvou sem erro.
 
-O Apps Script guarda histórico de versões, então a anterior fica recuperável.
+## Passo 2 — conferir que colou inteiro
 
-## Passo 2 — conferir que o código novo está lá
+Com `Ctrl+F`, procure e me diga se encontrou cada um:
 
-Com `Ctrl+F`, procure estes quatro trechos e me diga se cada um foi encontrado:
+1. `function migrarUsuariosEPapeis`
+2. `function notificar`
+3. `function validarInteiro`
+4. `function dataOperacional`
+5. `notif_marcar_todas_lidas`
 
-1. `function rotaRequisicoesCancelar`
-2. `const ABA_CHK_TEMPLATES`
-3. `function criarAbasChecklists`
-4. `"chk_responder_item": rotaChkResponderItem`
+Se algum não aparecer, **pare e me avise**.
 
-Se algum não aparecer, o código não colou inteiro. **Pare e me avise.**
+## Passo 3 — migrar as colunas e os papéis
 
-## Passo 3 — testar o acesso à planilha
+Este é o passo delicado do deploy: ele acrescenta colunas em duas abas **que já têm
+dados**. Antes de executar, abra a planilha e me diga:
 
-No seletor de função, escolha `testarAcessoPlanilha` e clique em **Executar**. Se pedir
-autorização, autorize com a conta dona da planilha.
+- quantas linhas preenchidas tem a aba **USUARIOS** (fora o cabeçalho)
+- quantas linhas preenchidas tem a aba **REQUISICOES** (fora o cabeçalho)
 
-Abra o log e me diga quais abas ele listou.
+Anote esses dois números. Depois selecione a função **`migrarUsuariosEPapeis`** e clique em
+**Executar**.
 
-## Passo 4 — criar as abas da Fase 5
+Ela faz três coisas, e nenhuma apaga nada:
+- acrescenta colunas **à direita** do cabeçalho de USUARIOS e REQUISICOES
+- cria a aba NOTIFICACOES
+- define os papéis do time, criando quem ainda não existe
 
-Selecione a função **`criarAbasChecklists`** e clique em **Executar**.
+Me diga o que apareceu no log. Deve ser parecido com:
+`USUARIOS: 3 coluna(s) acrescentada(s), 3 usuario(s) criado(s), 2 atualizado(s). REQUISICOES: 6 coluna(s). Aba NOTIFICACOES pronta.`
 
-Ela cria cinco abas (se ainda não existirem) e semeia seis checklists sem itens. Não apaga
-nada e pode rodar quantas vezes quiser.
+## Passo 4 — conferir que a migração não estragou nada
 
-Me diga o que apareceu no log — deve ser algo como
-`Abas da Fase 5 prontas. Checklists criados agora: 6. Ja existiam: 0.`
+Abra a planilha e me confirme, um por um:
 
-Depois abra a planilha e confirme que existem estas cinco abas novas, com estes
-cabeçalhos exatos na primeira linha:
+**USUARIOS** — cabeçalho tem que ser exatamente:
+`usuario_id | nome | login | senha_hash | perfil | ativo | papel | pode_atribuir_tarefa | papel_operacional`
 
-- **CHK_TEMPLATES**: `template_id | nome | local | responsavel | momento | dias_semana | ativo | criado_em`
-- **CHK_ITENS**: `item_id | template_id | ordem | descricao | tipo_evidencia | referencia | obrigatorio | ativo`
-- **CHK_EXECUCOES**: `execucao_id | template_id | data | local | usuario | status | iniciado_em | concluido_em`
-- **CHK_RESPOSTAS**: `resposta_id | execucao_id | item_id | valor | usuario | registrado_em`
-- **MURAL**: `aviso_id | criado_em | autor | texto | status | resolvido_por | resolvido_em`
+E tem que ter **5 linhas**: franco, jon, sarah, daniel, yvison. Me diga o valor das colunas
+`papel`, `pode_atribuir_tarefa` e `papel_operacional` de cada uma.
 
-E confirme que a aba CHK_TEMPLATES tem seis linhas, uma para cada:
-Pre-operacao Bar 22, Pre-operacao Bar 23, Contagem Estoque Central, Producao e pre-batch,
-Reposicao e vidraria, Double-check geral.
+**Importante**: confirme que as colunas antigas (nome, login, senha_hash) continuam com os
+valores certos e **não foram deslocadas**. Se algum senha_hash estiver vazio ou na coluna
+errada, **pare imediatamente e me avise** — é o único jeito de esta migração dar errado.
 
-## Passo 5 — ligar a expiração diária
+**REQUISICOES** — cabeçalho tem que terminar com:
+`... | obs | criado_por | criado_em | data_operacional | cancelado_por | cancelado_em | fechado_automaticamente`
 
-Selecione a função **`criarGatilhoDeExpiracao`** e clique em **Executar**.
+E o número de linhas tem que ser o **mesmo** que você anotou no Passo 3. As requisições
+antigas ficam com as colunas novas vazias — isso é esperado.
 
-Ela apaga o gatilho anterior da mesma função (se houver) e cria um novo, diário, entre 4h
-e 5h. Rodar de novo não acumula gatilhos duplicados.
+**NOTIFICACOES** — aba nova, cabeçalho:
+`notif_id | usuario | tipo | titulo | corpo | link | lida | criada_em`
 
-Se pedir autorização para gerenciar gatilhos, autorize.
-
-Depois vá em **Acionadores** (ícone de relógio na barra lateral) e me confirme que existe
-**exatamente um** acionador, para a função `chkExpirarAbertas`, do tipo "Baseado em tempo",
-diário.
-
-## Passo 6 — publicar nova versão da implantação existente
+## Passo 5 — publicar nova versão da implantação existente
 
 1. **Implantar** → **Gerenciar implantações** (não "Nova implantação").
-2. Na implantação que **já existe** do tipo "App da Web", clique no ícone de **lápis**.
-3. Em **Versão**, escolha **Nova versão** (primeira opção da lista, acima dos números).
-4. Descrição: `Fase 5 — checklists operacionais, mural e cancelamento de requisicao`
+2. Na implantação que **já existe** do tipo "App da Web", clique no **lápis**.
+3. Em **Versão**, escolha **Nova versão** (primeira opção, acima dos números).
+4. Descrição: `Fase 5 passos 1-4 — papeis, avisos, inteiro na requisicao`
 5. **Não toque** em "Executar como" nem em "Quem pode acessar".
 6. Clique em **Implantar**.
 
-## Passo 7 — confirmar que a URL não mudou
+## Passo 6 — confirmar que a URL não mudou
 
-Copie a URL do app da web depois de implantar e me mostre. Ela **tem que** conter
+Copie a URL do app da web e me mostre. Tem que conter
 `AKfycbwkpfNZz_CAr7viDL8YvFjE2J_o9wyd3gybqrZMyAE94WO3UaUFSKI89gk-srqvEg`.
 
-Se for diferente, você criou uma implantação nova em vez de uma versão nova.
-**Me avise imediatamente.**
+Se for diferente, você criou implantação nova. **Me avise imediatamente.**
 
 ## Ao final, me relate
 
-- Quantas linhas ficou o arquivo, e se os quatro trechos do Passo 2 foram encontrados
-- O log do `criarAbasChecklists`
-- Se as cinco abas foram criadas com os cabeçalhos certos e se CHK_TEMPLATES tem 6 linhas
-- Se o acionador diário aparece na tela de Acionadores
-- O número da versão nova e a URL da implantação
+- Linhas do arquivo e se os cinco trechos do Passo 2 foram encontrados
+- Os dois números de linhas que anotou antes da migração
+- O log do `migrarUsuariosEPapeis`
+- Os três cabeçalhos do Passo 4, e se as colunas antigas ficaram intactas
+- Número da versão nova e a URL
 - Qualquer erro ou tela inesperada
 
 ---
 
 ## O que muda com este deploy
 
-**Cancelar requisição.** Rota `requisicoes.cancelar`. Não apaga linha: marca `CANCELADO`,
-com quem cancelou e quando. Só cancela enquanto tudo está `PENDENTE` — depois que algo foi
-separado o estoque já baixou, e desfazer é movimento de devolução.
+**Papéis.** USUARIOS ganha `papel` (ADMIN/OPERADOR), `pode_atribuir_tarefa` e
+`papel_operacional`. Permissão deixa de depender de nome de pessoa: quem recebe aviso de
+requisição é quem tiver `papel_operacional = SEPARADOR`, e trocar isso é editar a planilha,
+não o código.
 
-**Fase 5 — checklists operacionais.** Cinco abas novas e doze rotas. Não escreve em
-MOVIMENTOS: lê apenas para validar evidência do tipo `CONTAGEM`. Toda escrita é upsert por
-chave dentro de lock, então reenviar sobrescreve em vez de acrescentar — é o antídoto para
-o padrão de contagem duplicada que existe no histórico de inventário. Timestamp é sempre do
-servidor.
+**Avisos in-app.** Aba NOTIFICACOES e uma função `notificar()` que é a única porta de saída
+de aviso. Canal único dentro do app — nenhum push, nenhum service worker, nenhuma permissão
+de navegador. Ela nunca lança: se a gravação do aviso falhar, a operação que a chamou segue.
 
-**Mural.** Quadro de recados da operação: qualquer um deixa, qualquer um resolve. Sem
-destinatário, prazo ou dono, e fora dos relatórios.
+**Inteiro na requisição.** Bug em produção: existe requisição gravada com 12,4 / 12,3 /
+12,2. Agora quantidade de requisição tem que ser inteiro positivo, validado no servidor, e
+um item inválido recusa a requisição inteira nomeando o item — sem arredondar em silêncio.
+A contagem não foi tocada: 0,8 de garrafa aberta continua válido.
 
-Nenhuma aba existente muda. Os oito testes de aceite do escopo rodam contra este mesmo
-arquivo com `npm run test:checklists`, num simulador de Apps Script — e passam.
+**Autoria da requisição.** Quem pediu, quando, e a data operacional (movimento antes das
+06:00 pertence ao dia anterior — a casa opera depois da meia-noite). Autoria é imutável:
+reenviar o mesmo req_id atualiza itens e preserva o autor original.
 
-## Observação de segurança que continua valendo
-
-O `APP_TOKEN` viaja dentro do JavaScript publicado no Netlify. Qualquer pessoa que abra o
-site consegue lê-lo e chamar estas rotas direto. Por isso a checagem de admin da Fase 5 é
-feita **no servidor**, contra a aba USUARIOS — nunca acreditando no que o cliente afirma
-sobre quem é. Ainda assim, fechar isso de verdade exige exigir login e senha nas rotas de
-escrita.
+Os testes de aceite rodam contra este mesmo arquivo com `npm test`, num simulador de Apps
+Script, e passam.

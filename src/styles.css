@@ -1852,3 +1852,13 @@ mark,
   font-size: 0.83rem;
   font-style: normal;
 }
+
+/* O campo recusou uma tecla. Precisa ser visto na hora: bloquear a vírgula
+   em silêncio faz "2,5" virar 25 sem ninguém perceber. */
+.avisoInteiro {
+  grid-column: 1 / -1;
+  color: var(--accent-amber);
+  font-size: 0.75rem;
+  font-style: normal;
+  text-align: right;
+}
