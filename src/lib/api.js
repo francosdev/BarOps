@@ -181,3 +181,49 @@ export async function consultarSaldos(filtros = {}) {
   if (resultado.ok === false) throw new Error(resultado.error);
   return resultado.saldos || [];
 }
+
+// --- Avisos e mural (Fase 5, blocos C e D) ---------------------------------
+
+// Devolve { avisos, naoLidas, badges }. Os badges já vêm agrupados por tipo,
+// prontos para virar contador no menu.
+export async function listarAvisos(usuario) {
+  const resultado = await chamarAppsScript({ action: "notif_listar", usuario });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado;
+}
+
+export async function marcarAvisoLido(notifId, usuario) {
+  const resultado = await chamarAppsScript({ action: "notif_marcar_lida", notif_id: notifId, usuario });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado;
+}
+
+export async function marcarTodosAvisosLidos(usuario) {
+  const resultado = await chamarAppsScript({ action: "notif_marcar_todas_lidas", usuario });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado;
+}
+
+export async function listarRecados(desde) {
+  const resultado = await chamarAppsScript({ action: "recado_listar", desde });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado.recados || [];
+}
+
+export async function publicarRecado(texto, usuario) {
+  const resultado = await chamarAppsScript({ action: "recado_publicar", texto, usuario });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado;
+}
+
+export async function desativarRecado(recadoId, usuario) {
+  const resultado = await chamarAppsScript({ action: "recado_desativar", recado_id: recadoId, usuario });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado;
+}
+
+export async function fixarRecado(recadoId, usuario, fixar) {
+  const resultado = await chamarAppsScript({ action: "recado_fixar", recado_id: recadoId, usuario, fixar });
+  if (resultado.ok === false) throw new Error(resultado.error);
+  return resultado;
+}

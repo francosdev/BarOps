@@ -8,6 +8,8 @@ import {
   consultarSaldos,
   cancelarRequisicao,
   criarRequisicao,
+  listarAvisos,
+  listarRecados,
   listarRequisicoes,
   separarRequisicao,
   isAppsScriptWebAppUrl,
@@ -16,6 +18,11 @@ import {
   listarUsuarios,
   loadIntegration,
   salvarCatalogo,
+  marcarAvisoLido,
+  marcarTodosAvisosLidos,
+  publicarRecado,
+  desativarRecado,
+  fixarRecado,
   salvarUsuarios,
 } from "./lib/api.js";
 import { entrar, carregarSessao, limparSessao, salvarSessao } from "./lib/auth.js";
@@ -1220,13 +1227,95 @@ function App() {
     listarRequisicoes().then(setRequisicoes).catch(() => setRequisicoes([]));
   }, [currentUser]);
 
-  const avisos = useMemo(() => montarAvisos({
+  // Um sino, duas fontes.
+  //
+  // Do servidor vem o que é EVENTO — requisição criada, recado novo, tarefa
+  // atribuída. Evento aconteceu uma vez, tem hora e pode ser marcado como
+  // lido; por isso é linha em NOTIFICACOES.
+  //
+  // Do cliente vem o que é ESTADO — produto abaixo do mínimo, contagem em
+  // aberto, estoque desatualizado. Estado não se lê: marcar "lido" num produto
+  // que continua zerado não muda nada, e ele volta no próximo carregamento.
+  // Guardar isso em tabela geraria uma linha nova a cada vez que alguém abre
+  // o app.
+  //
+  // Sem polling: recarrega quando troca de tela. A cota de execução do Apps
+  // Script é limitada, e cinco pessoas batendo a cada 10 s a queimam à toa.
+  const [avisosServidor, setAvisosServidor] = useState({ avisos: [], naoLidas: 0, badges: {} });
+
+  async function recarregarAvisos() {
+    if (!currentUser?.login) return;
+    try {
+      const resposta = await listarAvisos(currentUser.login);
+      // Nunca confiar na forma: uma resposta ok com outro formato (backend
+      // antigo, rota renomeada) derrubava o app inteiro no `.filter` de
+      // `avisos`. O sino não pode ser capaz de quebrar a tela.
+      setAvisosServidor({
+        avisos: Array.isArray(resposta?.avisos) ? resposta.avisos : [],
+        naoLidas: Number(resposta?.naoLidas) || 0,
+        badges: resposta?.badges && typeof resposta.badges === "object" ? resposta.badges : {},
+      });
+    } catch {
+      // Backend antigo ou rede fora: o sino cai só nos avisos derivados.
+      setAvisosServidor({ avisos: [], naoLidas: 0, badges: {} });
+    }
+  }
+
+  useEffect(() => { recarregarAvisos(); }, [currentUser, screen]);
+
+  const avisosDerivados = useMemo(() => montarAvisos({
     products,
     requisicoes,
     draft,
     isAdmin,
     sincronizadoEm: integration.estoqueSincronizadoEm || null,
   }), [products, requisicoes, draft, isAdmin, integration.estoqueSincronizadoEm]);
+
+  // Evento não lido primeiro; depois o estado, que é permanente enquanto durar.
+  const avisos = useMemo(() => [
+    ...avisosServidor.avisos.filter((aviso) => !aviso.lida).map((aviso) => ({
+      id: aviso.notifId,
+      notifId: aviso.notifId,
+      gravidade: aviso.tipo === "REQUISICAO_CRIADA" ? "alta" : "media",
+      icone: ICONE_POR_TIPO[aviso.tipo] || "sino",
+      titulo: aviso.titulo,
+      texto: aviso.corpo,
+      tela: telaDoLink(aviso.link),
+      quando: aviso.criadaEm,
+    })),
+    ...avisosDerivados,
+  ], [avisosServidor, avisosDerivados]);
+
+  // Badge de menu: o do servidor por tipo, mais o derivado que tem menu.
+  const badgesDeMenu = useMemo(() => ({
+    requisicoes: avisosServidor.badges.REQUISICAO_CRIADA || 0,
+    mural: avisosServidor.badges.RECADO_NOVO || 0,
+    tarefas: (avisosServidor.badges.TAREFA_ATRIBUIDA || 0) + (avisosServidor.badges.TAREFA_VENCENDO || 0),
+    stock: avisosDerivados.filter((a) => a.tela === "stock").length,
+  }), [avisosServidor, avisosDerivados]);
+
+  async function abrirAviso(aviso) {
+    setVerAvisos(false);
+    // Marcar como lido é do servidor; aviso derivado não tem o que marcar.
+    if (aviso.notifId) {
+      try {
+        await marcarAvisoLido(aviso.notifId, currentUser.login);
+        await recarregarAvisos();
+      } catch (error) {
+        notify(error.message || "Falha ao marcar o aviso.");
+      }
+    }
+    setScreen(aviso.tela === "count" && !draft ? "home" : aviso.tela);
+  }
+
+  async function marcarTudoLido() {
+    try {
+      await marcarTodosAvisosLidos(currentUser.login);
+      await recarregarAvisos();
+    } catch (error) {
+      notify(error.message || "Falha ao marcar os avisos.");
+    }
+  }
 
   function notify(message) {
     setToast(message);
@@ -1353,8 +1442,10 @@ function App() {
       {verAvisos && (
         <PainelAvisos
           avisos={avisos}
+          temNaoLidasDoServidor={avisosServidor.naoLidas > 0}
+          onAbrir={abrirAviso}
+          onMarcarTudo={marcarTudoLido}
           onFechar={() => setVerAvisos(false)}
-          onIr={(tela) => setScreen(tela === "count" && !draft ? "home" : tela)}
         />
       )}
 
@@ -1367,6 +1458,8 @@ function App() {
           onNew={() => setScreen("new")}
           onResume={() => setScreen("count")}
           onDescartarRascunho={descartarRascunho}
+          badges={badgesDeMenu}
+          onMural={() => setScreen("mural")}
           onStock={() => setScreen("stock")}
           onProducts={() => setScreen("products")}
           onUsers={() => setScreen("users")}
@@ -1507,6 +1600,10 @@ function App() {
       {screen === "prebatch" && <PreBatchScreen onNotify={notify} />}
       {/* Requisição é liberada para qualquer usuário logado; separar exige perfil. */}
       {screen === "requisicoes" && <RequisicoesScreen products={products} user={currentUser} onNotify={notify} />}
+      {/* Mural é de todo mundo: nenhum perfil é exigido para ler nem escrever. */}
+      {screen === "mural" && (
+        <MuralScreen user={currentUser} isAdmin={isAdmin} onNotify={notify} onAvisosMudaram={recarregarAvisos} />
+      )}
       {screen === "integration" && isAdmin && <IntegrationScreen integration={integration} onChange={setIntegration} products={products} onNotify={notify} />}
       {["details", "products", "users", "integration", "stock", "sheetUsers", "movements"].includes(screen) && !isAdmin && (
         <HomeScreen
@@ -1516,6 +1613,8 @@ function App() {
           onNew={() => setScreen("new")}
           onResume={() => setScreen("count")}
           onDescartarRascunho={descartarRascunho}
+          badges={badgesDeMenu}
+          onMural={() => setScreen("mural")}
           onFichas={() => setScreen("fichas")}
           onPreBatch={() => setScreen("prebatch")}
           onRequisicoes={() => setScreen("requisicoes")}
@@ -1625,6 +1724,7 @@ const ICONES = {
   concluido: <><circle cx="12" cy="12" r="8.5" /><path d="M8.2 12.3l2.6 2.6 5-5.4" /></>,
   parcial: <><circle cx="12" cy="12" r="8.5" /><path d="M12 3.5a8.5 8.5 0 000 17z" /></>,
   recusado: <><circle cx="12" cy="12" r="8.5" /><path d="M9.2 9.2l5.6 5.6M14.8 9.2l-5.6 5.6" /></>,
+  mural: <><rect x="3" y="4" width="18" height="14" rx="2.5" /><path d="M7 8.5h10M7 12h6" /><path d="M8 18v2.5l3-2.5" /></>,
   sino: <><path d="M6.5 10a5.5 5.5 0 0111 0c0 4 1.5 5.2 2 5.8H4.5c.5-.6 2-1.8 2-5.8z" /><path d="M10 19a2.2 2.2 0 004 0" /></>,
   remover: <><path d="M5 7h14" /><path d="M10 7V5.5a1 1 0 011-1h2a1 1 0 011 1V7" /><path d="M6.5 7l.8 12a1.5 1.5 0 001.5 1.4h6.4a1.5 1.5 0 001.5-1.4l.8-12" /><path d="M10.5 11v6M13.5 11v6" /></>,
 };
@@ -1695,12 +1795,15 @@ function useCliqueLongo(onSegurar, { atraso = 550 } = {}) {
 
 // Um item do menu inicial. É um botão inteiro, não um ícone com legenda: o
 // alvo do dedo é o cartão todo.
-function MenuTile({ icone, rotulo, variante = "", onClick, onSegurar, dica }) {
+function MenuTile({ icone, rotulo, variante = "", onClick, onSegurar, dica, badge }) {
   const longo = useCliqueLongo(onSegurar);
   return (
     <button
       type="button"
       className={`menuTile ${variante}`.trim()}
+      // O número do badge não pode virar parte do nome do botão: sem isto o
+      // leitor de tela anuncia "1 Requisições", com o número solto na frente.
+      aria-label={badge > 0 ? `${rotulo}, ${badge} aviso(s)` : undefined}
       onClick={() => { if (!longo.engoliuOClique()) onClick(); }}
       onPointerDown={longo.onPointerDown}
       onPointerUp={longo.onPointerUp}
@@ -1709,13 +1812,16 @@ function MenuTile({ icone, rotulo, variante = "", onClick, onSegurar, dica }) {
       onContextMenu={longo.onContextMenu}
     >
       <Icone nome={icone} />
+      {/* Sem push, o badge no menu é o que garante que alguém veja. Aviso
+          que vive só no sino ninguém vê. */}
+      {badge > 0 && <span className="menuBadge" aria-hidden="true">{badge}</span>}
       <span>{rotulo}</span>
       {dica && <em className="menuDica">{dica}</em>}
     </button>
   );
 }
 
-function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onDescartarRascunho, onStock, onProducts, onUsers, onIntegration, onSheetUsers, onMovements, onFichas, onPreBatch, onRequisicoes }) {
+function HomeScreen({ user, isAdmin, hasDraft, badges = {}, onMural, onNew, onResume, onDescartarRascunho, onStock, onProducts, onUsers, onIntegration, onSheetUsers, onMovements, onFichas, onPreBatch, onRequisicoes }) {
   // Dois grupos porque são dez portas: o que se usa no turno e o que se
   // ajusta de vez em quando. Quem não é admin só vê o primeiro, e aí o
   // título do grupo não aparece — um grupo só não precisa de nome.
@@ -1731,13 +1837,14 @@ function HomeScreen({ user, isAdmin, hasDraft, onNew, onResume, onDescartarRascu
       dica: "segure para apagar",
     },
     { icone: "inventario", rotulo: "Novo inventário", variante: "principal", onClick: onNew },
-    { icone: "requisicao", rotulo: "Requisições", onClick: onRequisicoes },
+    { icone: "requisicao", rotulo: "Requisições", onClick: onRequisicoes, badge: badges.requisicoes },
     { icone: "calculadora", rotulo: "Pré-batch", onClick: onPreBatch },
     { icone: "ficha", rotulo: "Fichas técnicas", onClick: onFichas },
+    { icone: "mural", rotulo: "Mural", onClick: onMural, badge: badges.mural },
   ].filter(Boolean);
 
   const gestao = isAdmin ? [
-    { icone: "estoque", rotulo: "Estoque atual", onClick: onStock },
+    { icone: "estoque", rotulo: "Estoque atual", onClick: onStock, badge: badges.stock },
     { icone: "movimentos", rotulo: "Movimentos", onClick: onMovements },
     { icone: "produtos", rotulo: "Produtos", onClick: onProducts },
     { icone: "usuarios", rotulo: "Usuários", onClick: onUsers },
@@ -2592,7 +2699,34 @@ function IntegrationScreen({ integration, onChange, products, onNotify }) {
  *
  * Cada aviso sabe para onde levar, para o toque no aviso já resolver.
  */
+// Espelha TAMANHO_MAX_RECADO do Apps Script. O servidor é quem recusa; aqui
+// o maxLength só evita a pessoa escrever 600 e descobrir no envio.
+const TAMANHO_MAX_RECADO_APP = 500;
+
 const GRAVIDADE = { alta: 2, media: 1 };
+
+// De que menu cada tipo de aviso do servidor fala.
+const ICONE_POR_TIPO = {
+  REQUISICAO_CRIADA: "requisicao",
+  RECADO_NOVO: "mural",
+  TAREFA_ATRIBUIDA: "inventario",
+  TAREFA_VENCENDO: "inventario",
+  CHECKLIST_PENDENTE: "ficha",
+};
+
+/**
+ * O link do aviso é uma rota do servidor ("/requisicoes/<id>"); aqui vira o
+ * nome da tela do app. Traduzir num lugar só evita que cada aviso precise
+ * saber como a navegação funciona.
+ */
+function telaDoLink(link) {
+  const rota = String(link || "");
+  if (rota.startsWith("/requisicoes")) return "requisicoes";
+  if (rota.startsWith("/mural")) return "mural";
+  if (rota.startsWith("/estoque")) return "stock";
+  if (rota.startsWith("/checklists")) return "checklists";
+  return "home";
+}
 
 function montarAvisos({ products, requisicoes, draft, isAdmin, sincronizadoEm }) {
   const avisos = [];
@@ -2670,17 +2804,22 @@ function montarAvisos({ products, requisicoes, draft, isAdmin, sincronizadoEm })
   return avisos.sort((a, b) => (GRAVIDADE[b.gravidade] || 0) - (GRAVIDADE[a.gravidade] || 0));
 }
 
-function PainelAvisos({ avisos, onIr, onFechar }) {
+function PainelAvisos({ avisos, temNaoLidasDoServidor, onAbrir, onMarcarTudo, onFechar }) {
   return (
     <Modal titulo="Avisos" onFechar={onFechar}>
       {!avisos.length && <EmptyState title="Nada pendente" text="Nenhum produto abaixo do mínimo e nenhuma requisição parada." />}
+      {temNaoLidasDoServidor && (
+        <div className="bottomActions">
+          <button className="ghostButton compact" onClick={onMarcarTudo}>Marcar todos como lidos</button>
+        </div>
+      )}
       <div className="avisoLista">
         {avisos.map((aviso) => (
           <button
             key={aviso.id}
             type="button"
             className={`avisoCard ${aviso.gravidade}`}
-            onClick={() => { onFechar(); onIr(aviso.tela); }}
+            onClick={() => onAbrir(aviso)}
           >
             <Icone nome={aviso.icone} />
             <span>
@@ -3702,6 +3841,166 @@ function PreBatchScreen({ onNotify }) {
   );
 }
 
+
+/** "há 2h", "ontem", "há 3 dias". Hora cheia não diz nada num mural. */
+function tempoRelativo(iso) {
+  const quando = new Date(iso).getTime();
+  if (!quando) return "";
+  const minutos = Math.floor((Date.now() - quando) / 60000);
+  if (minutos < 1) return "agora";
+  if (minutos < 60) return `há ${minutos} min`;
+  const horas = Math.floor(minutos / 60);
+  if (horas < 24) return `há ${horas}h`;
+  const dias = Math.floor(horas / 24);
+  if (dias === 1) return "ontem";
+  if (dias < 30) return `há ${dias} dias`;
+  return new Date(iso).toLocaleDateString("pt-BR");
+}
+
+/**
+ * Mural de recados da operação.
+ *
+ * Feed cronológico invertido, campo de escrita no topo, fixados acima de tudo.
+ * Sem thread, sem reação e sem resposta: o que precisa de conversa vai para o
+ * WhatsApp, e o mural fica sendo registro.
+ *
+ * Recado publicado não é editável — a correção é um recado novo. Por isso o
+ * único botão além de fixar é "tirar do mural", que é soft delete.
+ */
+function MuralScreen({ user, isAdmin, onNotify, onAvisosMudaram }) {
+  const [recados, setRecados] = useState([]);
+  const [texto, setTexto] = useState("");
+  const [carregando, setCarregando] = useState(false);
+  const [enviando, setEnviando] = useState(false);
+  const [erro, setErro] = useState("");
+  const [desde, setDesde] = useState("");
+
+  async function carregar(novoDesde) {
+    setCarregando(true);
+    setErro("");
+    try {
+      setRecados(await listarRecados(novoDesde || undefined));
+      if (novoDesde) setDesde(novoDesde);
+    } catch (error) {
+      setErro(error.message || "Falha ao ler o mural.");
+    } finally {
+      setCarregando(false);
+    }
+  }
+
+  useEffect(() => { carregar(); }, []);
+
+  async function publicar() {
+    const limpo = texto.trim();
+    if (limpo.length < 3) {
+      setErro("Escreva pelo menos 3 caracteres.");
+      return;
+    }
+    setEnviando(true);
+    setErro("");
+    try {
+      await publicarRecado(limpo, user?.login || "");
+      setTexto("");
+      await carregar(desde);
+      onNotify("Recado publicado. Todo mundo foi avisado.");
+      onAvisosMudaram();
+    } catch (error) {
+      setErro(error.message || "Falha ao publicar.");
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  async function acao(tarefa, rotulo) {
+    try {
+      await tarefa();
+      await carregar(desde);
+    } catch (error) {
+      onNotify(error.message || `Falha ao ${rotulo}.`);
+    }
+  }
+
+  const fixados = recados.filter((recado) => recado.fixado).length;
+  const restante = TAMANHO_MAX_RECADO_APP - texto.length;
+
+  return (
+    <main className="screen">
+      <h1>Mural</h1>
+      <p className="miniText">
+        Recado da operação. Quem publica avisa todo mundo. Não dá para editar depois —
+        se precisar corrigir, escreva outro.
+      </p>
+
+      <section className="panel stack">
+        <textarea
+          className="muralCampo"
+          value={texto}
+          maxLength={TAMANHO_MAX_RECADO_APP}
+          onChange={(evento) => setTexto(evento.target.value)}
+          placeholder="O que a próxima pessoa precisa saber?"
+          rows={3}
+        />
+        <div className="muralAcoes">
+          <span className={`miniText ${restante < 50 ? "quaseNoLimite" : ""}`}>{restante} caracteres</span>
+          <Button onClick={publicar} disabled={enviando || texto.trim().length < 3}>
+            {enviando ? "Publicando..." : "Publicar"}
+          </Button>
+        </div>
+        {erro && <p className="error">{erro}</p>}
+      </section>
+
+      {carregando && !recados.length && <p className="miniText">Lendo o mural...</p>}
+      {!carregando && !recados.length && (
+        <EmptyState title="Mural vazio" text="Nenhum recado nos últimos 30 dias." />
+      )}
+
+      <div className="list">
+        {recados.map((recado) => (
+          <article className={`recadoCard ${recado.fixado ? "fixado" : ""}`} key={recado.recadoId}>
+            <div className="recadoTopo">
+              <strong>{recado.autor}</strong>
+              <em>{tempoRelativo(recado.criadoEm)}</em>
+              {recado.fixado && <span className="status warn">fixado</span>}
+            </div>
+            <p className="recadoTexto">{recado.texto}</p>
+            <div className="recadoAcoes">
+              {isAdmin && (
+                <button
+                  className="ghostButton compact"
+                  onClick={() => acao(() => fixarRecado(recado.recadoId, user.login, !recado.fixado), "fixar")}
+                  // Com três já fixados o botão continua ativo: o servidor
+                  // recusa e devolve quais estão fixados, e é essa mensagem
+                  // que diz para a pessoa qual precisa sair.
+                  title={recado.fixado ? "Tirar do topo" : `Fixar no topo (${fixados}/3)`}
+                >
+                  {recado.fixado ? "Desafixar" : "Fixar"}
+                </button>
+              )}
+              {(isAdmin || recado.autor === user?.login) && (
+                <button
+                  className="ghostButton compact"
+                  onClick={() => acao(() => desativarRecado(recado.recadoId, user.login), "tirar do mural")}
+                >
+                  Tirar do mural
+                </button>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+
+      <div className="acaoNoFim">
+        <button
+          className="ghostButton"
+          disabled={carregando || Boolean(desde)}
+          onClick={() => carregar(new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10))}
+        >
+          {desde ? "Mostrando os últimos 6 meses" : "Carregar recados mais antigos"}
+        </button>
+      </div>
+    </main>
+  );
+}
 
 // Requisição em duas pernas (Fase 3):
 //

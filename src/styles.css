@@ -81,7 +81,9 @@ button:disabled {
   top: 0;
   z-index: 5;
   display: grid;
-  grid-template-columns: auto auto 1fr auto;
+  /* Cinco colunas desde que o sino entrou: casa, logo, identificação, sino,
+     sair. Com quatro, o "Sair" quebrava para uma segunda linha no celular. */
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   gap: 0.75rem;
   align-items: center;
   padding: 0.75rem 1rem;
@@ -1861,4 +1863,137 @@ mark,
   font-size: 0.75rem;
   font-style: normal;
   text-align: right;
+}
+
+/* --- Mural ------------------------------------------------------------- */
+
+.muralCampo {
+  width: 100%;
+  min-height: 5.5rem;
+  padding: 0.75rem;
+  border: 1px solid #2a2a2a;
+  border-radius: 10px;
+  background: #111111;
+  color: #f5f5f5;
+  font: inherit;
+  font-size: 1rem;
+  resize: vertical;
+}
+
+.muralAcoes {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.muralAcoes .miniText {
+  margin: 0;
+}
+
+.muralAcoes button {
+  flex: none;
+  width: auto;
+}
+
+.quaseNoLimite {
+  color: var(--accent-amber);
+}
+
+.recadoCard {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.85rem;
+  border: 1px solid #2a2a2a;
+  border-radius: 10px;
+  background: #1a1a1a;
+}
+
+/* Fixado tem que se distinguir de longe: é o que a casa decidiu que ninguém
+   pode deixar de ler. */
+.recadoCard.fixado {
+  border-color: var(--accent-amber);
+  background: rgba(200, 138, 45, 0.09);
+}
+
+.recadoTopo {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.recadoTopo strong {
+  font-size: 0.92rem;
+  text-transform: capitalize;
+}
+
+.recadoTopo em {
+  flex: 1;
+  color: #808080;
+  font-size: 0.78rem;
+  font-style: normal;
+}
+
+.recadoTexto {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.recadoAcoes {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Contador no cartão do menu. Fica no canto oposto ao ícone. */
+.menuBadge {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  min-width: 20px;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  background: var(--brand-red);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.menuTile {
+  position: relative;
+}
+
+.menuTile.principal .menuBadge {
+  background: #fff;
+  color: var(--brand-red);
+}
+
+/* O nome de quem está logado é o que pode encolher: no celular ele corta com
+   reticências em vez de empurrar o sino e o Sair para outra linha. */
+.topbar > div {
+  min-width: 0;
+}
+
+.topbar > div strong,
+.topbar > div span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "Carregar mais" é rodapé de lista, não ação fixa de tela: preso embaixo ele
+   cobria o último recado. */
+.acaoNoFim {
+  display: flex;
+  justify-content: center;
+  margin: 1rem 0 2rem;
+}
+
+.acaoNoFim button {
+  width: 100%;
 }
