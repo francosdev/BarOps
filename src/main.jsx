@@ -1242,6 +1242,10 @@ function App() {
   // Sem polling: recarrega quando troca de tela. A cota de execução do Apps
   // Script é limitada, e cinco pessoas batendo a cada 10 s a queimam à toa.
   const [avisosServidor, setAvisosServidor] = useState({ avisos: [], naoLidas: 0, badges: {} });
+  // O mural só entra no menu quando a planilha sabe responder por ele. Menu
+  // que leva a uma tela de erro é pior do que menu sem o item — e assim o
+  // próximo deploy do Apps Script acende o mural sozinho, sem tocar no app.
+  const [muralDisponivel, setMuralDisponivel] = useState(false);
 
   async function recarregarAvisos() {
     if (!currentUser?.login) return;
@@ -1262,6 +1266,11 @@ function App() {
   }
 
   useEffect(() => { recarregarAvisos(); }, [currentUser, screen]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    listarRecados().then(() => setMuralDisponivel(true)).catch(() => setMuralDisponivel(false));
+  }, [currentUser]);
 
   const avisosDerivados = useMemo(() => montarAvisos({
     products,
@@ -1459,6 +1468,7 @@ function App() {
           onResume={() => setScreen("count")}
           onDescartarRascunho={descartarRascunho}
           badges={badgesDeMenu}
+          temMural={muralDisponivel}
           onMural={() => setScreen("mural")}
           onStock={() => setScreen("stock")}
           onProducts={() => setScreen("products")}
@@ -1614,6 +1624,7 @@ function App() {
           onResume={() => setScreen("count")}
           onDescartarRascunho={descartarRascunho}
           badges={badgesDeMenu}
+          temMural={muralDisponivel}
           onMural={() => setScreen("mural")}
           onFichas={() => setScreen("fichas")}
           onPreBatch={() => setScreen("prebatch")}
@@ -1821,7 +1832,7 @@ function MenuTile({ icone, rotulo, variante = "", onClick, onSegurar, dica, badg
   );
 }
 
-function HomeScreen({ user, isAdmin, hasDraft, badges = {}, onMural, onNew, onResume, onDescartarRascunho, onStock, onProducts, onUsers, onIntegration, onSheetUsers, onMovements, onFichas, onPreBatch, onRequisicoes }) {
+function HomeScreen({ user, isAdmin, hasDraft, badges = {}, temMural, onMural, onNew, onResume, onDescartarRascunho, onStock, onProducts, onUsers, onIntegration, onSheetUsers, onMovements, onFichas, onPreBatch, onRequisicoes }) {
   // Dois grupos porque são dez portas: o que se usa no turno e o que se
   // ajusta de vez em quando. Quem não é admin só vê o primeiro, e aí o
   // título do grupo não aparece — um grupo só não precisa de nome.
@@ -1840,7 +1851,7 @@ function HomeScreen({ user, isAdmin, hasDraft, badges = {}, onMural, onNew, onRe
     { icone: "requisicao", rotulo: "Requisições", onClick: onRequisicoes, badge: badges.requisicoes },
     { icone: "calculadora", rotulo: "Pré-batch", onClick: onPreBatch },
     { icone: "ficha", rotulo: "Fichas técnicas", onClick: onFichas },
-    { icone: "mural", rotulo: "Mural", onClick: onMural, badge: badges.mural },
+    temMural && { icone: "mural", rotulo: "Mural", onClick: onMural, badge: badges.mural },
   ].filter(Boolean);
 
   const gestao = isAdmin ? [
