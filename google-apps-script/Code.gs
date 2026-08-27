@@ -23,11 +23,15 @@ const ABA_REQUISICOES = "REQUISICOES";
 
 const CABECALHOS = {
   PRODUTOS: ["produto_id", "nome_canonico", "categoria", "unidade", "fator_pack", "pack_nome", "fornecedor", "minimo", "ativo", "requisitavel", "produzido"],
-  USUARIOS: ["usuario_id", "nome", "login", "senha_hash", "perfil", "ativo"],
+  // papel decide o que a pessoa pode; nome de pessoa nunca entra no codigo.
+  // Yvison pode sair da casa — o papel fica.
+  USUARIOS: ["usuario_id", "nome", "login", "senha_hash", "perfil", "ativo", "papel", "pode_atribuir_tarefa", "papel_operacional"],
   MOVIMENTOS: ["mov_id", "timestamp", "tipo", "origem", "destino", "produto_id", "qtd", "unidade", "usuario_id", "ref_documento", "obs"],
   // Uma linha por item. A chave e (req_id, produto_id): a mesma requisicao
   // nao pede o mesmo produto duas vezes.
-  REQUISICOES: ["req_id", "data", "solicitante_id", "destino", "produto_id", "qtd_pedida", "qtd_separada", "status", "separador_id", "timestamp_separacao", "recebedor_id", "timestamp_recebimento", "obs"],
+  // As colunas de autoria (E4) vem depois das antigas de proposito: assim a
+  // migracao so acrescenta a direita e nenhuma linha ja gravada se desloca.
+  REQUISICOES: ["req_id", "data", "solicitante_id", "destino", "produto_id", "qtd_pedida", "qtd_separada", "status", "separador_id", "timestamp_separacao", "recebedor_id", "timestamp_recebimento", "obs", "criado_por", "criado_em", "data_operacional", "cancelado_por", "cancelado_em", "fechado_automaticamente"],
 
   // Fase 5 — checklists operacionais.
   CHK_TEMPLATES: ["template_id", "nome", "local", "responsavel", "momento", "dias_semana", "ativo", "criado_em"],
@@ -35,7 +39,15 @@ const CABECALHOS = {
   CHK_EXECUCOES: ["execucao_id", "template_id", "data", "local", "usuario", "status", "iniciado_em", "concluido_em"],
   CHK_RESPOSTAS: ["resposta_id", "execucao_id", "item_id", "valor", "usuario", "registrado_em"],
   MURAL: ["aviso_id", "criado_em", "autor", "texto", "status", "resolvido_por", "resolvido_em"],
+
+  // Bloco D — avisos dentro do app. Canal unico INAPP.
+  NOTIFICACOES: ["notif_id", "usuario", "tipo", "titulo", "corpo", "link", "lida", "criada_em"],
 };
+
+// A casa opera depois da meia-noite. Movimento antes desta hora pertence ao
+// dia anterior — requisicao das 02:30 de sabado e da operacao de sexta.
+const HORA_CORTE_OPERACIONAL = 6;
+const TIMEZONE_CASA = "America/Sao_Paulo";
 
 // Fluxo de duas pernas: quem precisa pede, o estoquista separa e manda. A
 // baixa no estoque acontece na separacao — nao ha confirmacao de recebimento,
@@ -310,6 +322,11 @@ const ROTAS = {
   "mural_listar": rotaMuralListar,
   "mural_criar": rotaMuralCriar,
   "mural_resolver": rotaMuralResolver,
+
+  // Bloco D — avisos.
+  "notif_listar": rotaNotifListar,
+  "notif_marcar_lida": rotaNotifMarcarLida,
+  "notif_marcar_todas_lidas": rotaNotifMarcarTodasLidas,
 };
 
 // Cria as tres abas e, se PRODUTOS/USUARIOS estiverem vazias, semeia com o
@@ -433,6 +450,11 @@ function rotaUsuariosSalvar(payload) {
           hash,
           String(usuario.perfil || atual.perfil || "consulta"),
           usuario.ativo !== false,
+          String(usuario.papel || atual.papel || "OPERADOR").toUpperCase(),
+          usuario.podeAtribuirTarefa === undefined
+            ? (String(atual.pode_atribuir_tarefa).toUpperCase() === "TRUE" || atual.pode_atribuir_tarefa === true)
+            : usuario.podeAtribuirTarefa === true,
+          String(usuario.papelOperacional === undefined ? (atual.papel_operacional || "") : usuario.papelOperacional).toUpperCase(),
         ]]);
         atualizados += 1;
       } else {
@@ -588,17 +610,44 @@ function rotaRequisicoesCriar(payload) {
     });
     if (jaExiste) return { ok: true, reqId, criados: 0, duplicada: true };
 
+    // E1: valida TODOS os itens antes de gravar qualquer um. Um item invalido
+    // recusa a requisicao inteira e diz qual foi — arredondar em silencio
+    // esconderia o erro de digitacao, que e exatamente o que produziu a
+    // requisicao com 12,4 / 12,3 / 12,2 que esta no historico.
+    const invalidos = [];
+    itens.forEach(function (item) {
+      const produtoId = String(item.produtoId || "");
+      if (!produtoId) return;
+      if (validarInteiro(item.qtd) === null) {
+        invalidos.push(String(item.produto || produtoId) + " (" + String(item.qtd) + ")");
+      }
+    });
+    if (invalidos.length) {
+      return {
+        ok: false,
+        error: "Quantidade tem que ser numero inteiro maior que zero. Corrija: " + invalidos.join(", "),
+        itensInvalidos: invalidos,
+      };
+    }
+
+    // E4: autoria vem da sessao, nunca de campo de tela, e o instante e do
+    // servidor. criado_em guarda o momento real; data_operacional guarda o
+    // dia de operacao, que antes das 06:00 e o dia anterior.
+    const agora = agoraISO();
+    const criadoPor = normalizeLogin(payload.criadoPor || payload.solicitanteId || "");
+    const diaOperacional = dataOperacional(agora);
+
     const vistos = {};
     const linhas = [];
     itens.forEach(function (item) {
       const produtoId = String(item.produtoId || "");
-      const qtd = Number(item.qtd) || 0;
-      // Produto repetido ou quantidade zerada nao vira linha.
-      if (!produtoId || qtd <= 0 || vistos[produtoId]) return;
+      const qtd = validarInteiro(item.qtd);
+      // Produto repetido nao vira segunda linha.
+      if (!produtoId || qtd === null || vistos[produtoId]) return;
       vistos[produtoId] = true;
       linhas.push([
         reqId,
-        String(payload.data || new Date().toISOString().slice(0, 10)),
+        String(payload.data || diaOperacional),
         String(payload.solicitanteId || ""),
         destino,
         produtoId,
@@ -607,12 +656,28 @@ function rotaRequisicoesCriar(payload) {
         "PENDENTE",
         "", "", "", "",
         String(item.obs || ""),
+        criadoPor,
+        agora,
+        diaOperacional,
+        "", "", false,
       ]);
     });
 
     if (!linhas.length) return { ok: false, error: "Nenhum item valido na requisicao." };
     sheet.getRange(sheet.getLastRow() + 1, 1, linhas.length, CABECALHOS.REQUISICOES.length).setValues(linhas);
-    return { ok: true, reqId, criados: linhas.length };
+
+    // E3: avisa quem separa. Destinatario resolvido por PAPEL — trocar o
+    // papel_operacional na planilha muda quem recebe, sem tocar em codigo.
+    // notificar() nunca lanca: aviso que falha nao derruba a requisicao.
+    notificar({
+      destinatarios: usuariosComPapelOperacional("SEPARADOR"),
+      tipo: "REQUISICAO_CRIADA",
+      titulo: "Nova requisicao - " + destino,
+      corpo: nomeDoUsuario(ss, criadoPor) + " pediu " + linhas.length + " item(ns)",
+      link: "/requisicoes/" + reqId,
+    });
+
+    return { ok: true, reqId, criados: linhas.length, criadoPor: criadoPor, dataOperacional: diaOperacional };
   } finally {
     lock.releaseLock();
   }
@@ -763,14 +828,22 @@ function rotaRequisicoesSeparar(payload) {
 
     const movimentos = [];
     const atualizacoes = [];
+    const separacaoInvalida = [];
     alvo.forEach(function (a) {
       const produtoId = String(a.linha.produto_id);
       const pedida = Number(a.linha.qtd_pedida) || 0;
       const decisao = decisoes[produtoId];
       // Item nao mencionado na separacao e tratado como recusado por falta.
-      const bruta = decisao ? Number(decisao.qtdSeparada) : 0;
+      // Zero e recusa por falta, e e valido; o resto tem que ser inteiro.
+      const bruta = decisao === undefined || decisao.qtdSeparada === "" || decisao.qtdSeparada === null
+        ? 0
+        : (String(decisao.qtdSeparada).trim() === "0" ? 0 : validarInteiro(decisao.qtdSeparada));
+      if (bruta === null) {
+        separacaoInvalida.push(String(a.linha.produto_id) + " (" + String(decisao.qtdSeparada) + ")");
+        return;
+      }
       // Nunca mais do que o pedido.
-      const separada = Math.max(0, Math.min(pedida, Number.isFinite(bruta) ? bruta : 0));
+      const separada = Math.max(0, Math.min(pedida, bruta));
       const status = separada === 0 ? "RECUSADO" : (separada < pedida ? "PARCIAL" : "SEPARADO");
       const obs = decisao && decisao.obs ? String(decisao.obs) : String(a.linha.obs || "");
 
@@ -790,6 +863,13 @@ function rotaRequisicoesSeparar(payload) {
         }));
       }
     });
+
+    if (separacaoInvalida.length) {
+      return {
+        ok: false,
+        error: "Quantidade separada tem que ser inteiro. Corrija: " + separacaoInvalida.join(", "),
+      };
+    }
 
     // Movimentos primeiro: se a baixa falhar, a requisicao continua PENDENTE
     // e o estoquista tenta de novo. O contrario deixaria a requisicao fechada
@@ -1011,6 +1091,9 @@ function linhaUsuarioNova(usuario) {
     hashSenha(String(usuario.senha || "")),
     String(usuario.perfil || "consulta"),
     usuario.ativo !== false,
+    String(usuario.papel || "OPERADOR").toUpperCase(),
+    usuario.podeAtribuirTarefa === true,
+    String(usuario.papelOperacional || "").toUpperCase(),
   ];
 }
 
@@ -1054,6 +1137,9 @@ function usuarioPublico(linha) {
     // Um usuario pode acumular perfis: "admin, producao".
     perfis: String(linha.perfil || "").split(",").map(function (p) { return p.trim().toLowerCase(); }).filter(Boolean),
     ativo: linha.ativo !== false && String(linha.ativo).toUpperCase() !== "FALSE",
+    papel: String(linha.papel || "OPERADOR").toUpperCase(),
+    podeAtribuirTarefa: String(linha.pode_atribuir_tarefa).toUpperCase() === "TRUE" || linha.pode_atribuir_tarefa === true,
+    papelOperacional: String(linha.papel_operacional || "").toUpperCase(),
   };
 }
 
@@ -1990,6 +2076,89 @@ function rotaMuralResolver(payload) {
 }
 
 /**
+ * Acrescenta as colunas novas no cabecalho de uma aba que ja tem dados.
+ *
+ * garantirAba so escreve cabecalho em aba vazia, entao aba com historico
+ * nunca ganharia coluna nova sozinha. As colunas novas sempre entram a
+ * DIREITA das antigas, e por isso reescrever a linha 1 inteira nao desloca
+ * nenhuma celula ja gravada.
+ */
+function migrarCabecalho(ss, nome) {
+  const sheet = garantirAba(ss, nome);
+  const esperado = CABECALHOS[nome];
+  const largura = Math.max(sheet.getLastColumn(), esperado.length);
+  const atual = sheet.getRange(1, 1, 1, largura).getValues()[0]
+    .map(function (c) { return String(c || "").trim(); });
+
+  let faltando = 0;
+  esperado.forEach(function (coluna, i) { if (atual[i] !== coluna) faltando += 1; });
+  if (!faltando) return 0;
+
+  sheet.getRange(1, 1, 1, esperado.length).setValues([esperado]);
+  sheet.getRange(1, 1, 1, esperado.length).setFontWeight("bold");
+  return faltando;
+}
+
+/**
+ * Rode UMA VEZ no editor depois de colar o codigo novo.
+ *
+ * Acrescenta as colunas de papel em USUARIOS e as de autoria em REQUISICOES,
+ * cria a aba NOTIFICACOES, e define os papeis do time.
+ *
+ * Usuario que ainda nao existe em USUARIOS e criado com a senha abaixo, que e
+ * o PIN que a pessoa ja usa no acesso de reserva do aparelho — assim o login
+ * dela nao muda. Usuario que ja existe mantem a senha; so os papeis mudam.
+ *
+ * Rodar de novo nao duplica ninguem.
+ */
+function migrarUsuariosEPapeis() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const colunasUsuarios = migrarCabecalho(ss, ABA_USUARIOS);
+  const colunasRequisicoes = migrarCabecalho(ss, ABA_REQUISICOES);
+  garantirAba(ss, ABA_NOTIFICACOES);
+
+  // papel decide permissao; papel_operacional decide quem recebe qual aviso.
+  // Nenhum dos dois esta amarrado a nome de pessoa no codigo.
+  const time = [
+    { nome: "Carlos Franco", login: "franco", senha: "0278", perfil: "admin", papel: "ADMIN", atribui: true, operacional: "" },
+    { nome: "Jon", login: "jon", senha: "4060", perfil: "lider_turno, requisitante, separador", papel: "OPERADOR", atribui: false, operacional: "SEPARADOR" },
+    { nome: "Sarah", login: "sarah", senha: "1020", perfil: "lider_turno, requisitante", papel: "OPERADOR", atribui: false, operacional: "" },
+    { nome: "Daniel", login: "daniel", senha: "2030", perfil: "lider_turno, requisitante", papel: "OPERADOR", atribui: false, operacional: "" },
+    { nome: "Yvison", login: "yvison", senha: "3040", perfil: "lider_turno, requisitante, separador", papel: "OPERADOR", atribui: true, operacional: "" },
+  ];
+
+  const sheet = garantirAba(ss, ABA_USUARIOS);
+  const existentes = lerAbaComLinha(ss, ABA_USUARIOS);
+  let criados = 0;
+  let atualizados = 0;
+
+  time.forEach(function (pessoa) {
+    const atual = existentes.filter(function (u) { return normalizeLogin(u.login) === pessoa.login; })[0];
+    if (atual) {
+      // Senha e nome ficam como estao; so os papeis sao definidos.
+      const linha = CABECALHOS.USUARIOS.map(function (coluna) { return atual[coluna]; });
+      linha[CABECALHOS.USUARIOS.indexOf("papel")] = pessoa.papel;
+      linha[CABECALHOS.USUARIOS.indexOf("pode_atribuir_tarefa")] = pessoa.atribui;
+      linha[CABECALHOS.USUARIOS.indexOf("papel_operacional")] = pessoa.operacional;
+      sheet.getRange(atual._row, 1, 1, CABECALHOS.USUARIOS.length).setValues([linha]);
+      atualizados += 1;
+      return;
+    }
+    sheet.appendRow(linhaUsuarioNova({
+      nome: pessoa.nome, login: pessoa.login, senha: pessoa.senha, perfil: pessoa.perfil,
+      papel: pessoa.papel, podeAtribuirTarefa: pessoa.atribui, papelOperacional: pessoa.operacional,
+    }));
+    criados += 1;
+  });
+
+  Logger.log(
+    "USUARIOS: " + colunasUsuarios + " coluna(s) acrescentada(s), " + criados + " usuario(s) criado(s), " +
+    atualizados + " atualizado(s). REQUISICOES: " + colunasRequisicoes + " coluna(s). Aba NOTIFICACOES pronta."
+  );
+  return { criados: criados, atualizados: atualizados };
+}
+
+/**
  * Rode UMA VEZ no editor do Apps Script, depois de colar o codigo novo.
  *
  * Cria as cinco abas da Fase 5 e semeia os seis checklists do escopo, sem
@@ -2080,4 +2249,239 @@ function rotaChkBootstrap(payload) {
   });
 
   return { ok: true, criados: criados, existentes: existentes.length };
+}
+
+// ===========================================================================
+// BLOCO E — CORRECOES NA REQUISICAO
+// ===========================================================================
+
+/**
+ * E1 — quantidade de requisicao e inteiro positivo.
+ *
+ * Nao existe requisitar meia garrafa: requisicao move unidade fechada do
+ * estoque para o bar. Contagem e outra coisa e continua aceitando decimal —
+ * garrafa aberta pela metade e 0,5 e isso esta certo. Esta funcao NAO e usada
+ * no fluxo de contagem.
+ *
+ * Devolve null para invalido. Nunca arredonda: arredondar esconde erro de
+ * digitacao, e a producao ja tem uma requisicao com 12,4 / 12,3 / 12,2 que
+ * so pode ter vindo de dedo escorregando no teclado.
+ */
+function validarInteiro(valor) {
+  var s = String(valor === undefined || valor === null ? "" : valor).trim();
+  if (!/^\d+$/.test(s)) return null;   // rejeita vazio, sinal, ponto, virgula, notacao cientifica
+  var n = parseInt(s, 10);
+  if (n <= 0) return null;
+  return n;
+}
+
+/**
+ * E4 — data operacional.
+ *
+ * A casa opera depois da meia-noite: o historico tem lancamento as 01:25,
+ * 02:06 e 02:35. Requisicao feita as 02:30 de sabado pertence a operacao de
+ * sexta. Antes do corte, o movimento e do dia anterior.
+ *
+ * criado_em guarda o instante real; data_operacional guarda o dia de
+ * operacao. Os dois coexistem — um nao substitui o outro.
+ */
+function dataOperacional(instante) {
+  const data = instante ? new Date(instante) : new Date();
+  // A hora sai formatada no fuso da casa; o dia anterior sai recuando 24h no
+  // instante e formatando de novo. Sem ida-e-volta por string de data: o
+  // parser de Date depende de formato e de fuso do runtime, e aqui os dois
+  // precisam ser os da casa, nao os do servidor.
+  const hora = Number(Utilities.formatDate(data, TIMEZONE_CASA, "H"));
+  const ajustada = hora < HORA_CORTE_OPERACIONAL ? new Date(data.getTime() - 86400000) : data;
+  return Utilities.formatDate(ajustada, TIMEZONE_CASA, "yyyy-MM-dd");
+}
+
+/** Nome de exibicao de um login, para o corpo do aviso. */
+function nomeDoUsuario(ss, login) {
+  const alvo = normalizeLogin(login);
+  const achado = lerAba(ss, ABA_USUARIOS).filter(function (u) { return normalizeLogin(u.login) === alvo; })[0];
+  return achado ? textoDe(achado.nome) || alvo : alvo;
+}
+
+// ===========================================================================
+// BLOCO D — CAMADA DE AVISOS (IN-APP)
+//
+// Canal unico: INAPP. Nao existe push, e-mail nem WhatsApp aqui, e isso e
+// deliberado — o ping de urgencia continua sendo pessoa mandando mensagem.
+// Este modulo e o registro dentro do app.
+//
+// Como nao ha push, o aviso precisa ser dificil de perder DENTRO do app: alem
+// do sino, cada aviso alimenta um badge no menu correspondente. Aviso que vive
+// so no sino ninguem ve.
+// ===========================================================================
+
+const ABA_NOTIFICACOES = "NOTIFICACOES";
+
+const TIPOS_NOTIFICACAO = [
+  "TAREFA_ATRIBUIDA", "TAREFA_VENCENDO", "RECADO_NOVO", "REQUISICAO_CRIADA", "CHECKLIST_PENDENTE",
+];
+
+// Aviso mais velho que isto some da lista. A linha fica na planilha.
+const DIAS_DE_AVISO = 30;
+
+// Mesma chave em menos disto vira um aviso so. Salvar a requisicao duas vezes
+// seguidas nao pode tocar o sino do Jon duas vezes.
+const MINUTOS_DEDUPLICACAO = 5;
+
+/**
+ * A unica porta de saida de aviso do app. Todo modulo chama esta funcao e
+ * nenhuma escreve na aba direto.
+ *
+ * NUNCA lanca. Se a gravacao do aviso falhar, a operacao que a chamou tem que
+ * seguir: requisicao gravada sem aviso e um problema pequeno, requisicao
+ * perdida por causa do aviso e um problema grande.
+ */
+function notificar(opcoes) {
+  try {
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const destinatarios = (opcoes.destinatarios || [])
+      .map(function (d) { return textoDe(d).toLowerCase(); })
+      .filter(Boolean);
+    if (!destinatarios.length) return { ok: true, gravados: 0, motivo: "sem destinatarios" };
+
+    const tipo = textoDe(opcoes.tipo).toUpperCase();
+    const link = textoDe(opcoes.link);
+    const agora = agoraISO();
+    const limiteDedup = Date.now() - MINUTOS_DEDUPLICACAO * 60000;
+
+    const lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+    try {
+      const existentes = lerAba(ss, ABA_NOTIFICACOES);
+      const sheet = garantirAba(ss, ABA_NOTIFICACOES);
+      const novas = [];
+
+      destinatarios.forEach(function (usuario) {
+        // Deduplicacao por (usuario, tipo, link) dentro da janela.
+        const recente = existentes.some(function (n) {
+          if (textoDe(n.usuario).toLowerCase() !== usuario) return false;
+          if (textoDe(n.tipo).toUpperCase() !== tipo) return false;
+          if (textoDe(n.link) !== link) return false;
+          const quando = new Date(textoDe(n.criada_em)).getTime();
+          return quando && quando >= limiteDedup;
+        });
+        if (recente) return;
+        novas.push([
+          novoId("ntf"), usuario, tipo, textoDe(opcoes.titulo), textoDe(opcoes.corpo),
+          link, false, agora,
+        ]);
+      });
+
+      if (novas.length) {
+        sheet.getRange(sheet.getLastRow() + 1, 1, novas.length, CABECALHOS.NOTIFICACOES.length).setValues(novas);
+      }
+      return { ok: true, gravados: novas.length, ignorados: destinatarios.length - novas.length };
+    } finally {
+      lock.releaseLock();
+    }
+  } catch (erro) {
+    // Log e segue. O chamador nunca sabe que falhou.
+    try { Logger.log("Falha ao notificar: " + erro.message); } catch (e) {}
+    return { ok: false, error: String(erro && erro.message) };
+  }
+}
+
+/** Logins ativos com aquele papel operacional. Resolvido por papel, nunca por nome. */
+function usuariosComPapelOperacional(papel) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const alvo = textoDe(papel).toUpperCase();
+  return lerAba(ss, ABA_USUARIOS)
+    .filter(function (u) { return ehVerdadeiro(u.ativo) && textoDe(u.papel_operacional).toUpperCase() === alvo; })
+    .map(function (u) { return normalizeLogin(u.login); });
+}
+
+/** Todos os logins ativos, menos os excluidos. Usado pelo mural. */
+function usuariosAtivos(exceto) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const fora = (exceto || []).map(function (e) { return textoDe(e).toLowerCase(); });
+  return lerAba(ss, ABA_USUARIOS)
+    .filter(function (u) { return ehVerdadeiro(u.ativo); })
+    .map(function (u) { return normalizeLogin(u.login); })
+    .filter(function (login) { return login && fora.indexOf(login) < 0; });
+}
+
+/**
+ * Avisos da pessoa: os 30 ultimos dias, mais recentes primeiro, com os
+ * contadores que alimentam o sino e os badges de menu.
+ *
+ * Os badges saem daqui prontos, por tipo — a tela nao precisa saber que
+ * REQUISICAO_CRIADA vira badge no menu de requisicoes.
+ */
+function rotaNotifListar(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const usuario = normalizeLogin(payload.usuario);
+  if (!usuario) return { ok: false, error: "Informe o usuario." };
+
+  const corte = Date.now() - DIAS_DE_AVISO * 86400000;
+  const minhas = lerAba(ss, ABA_NOTIFICACOES)
+    .filter(function (n) {
+      if (normalizeLogin(n.usuario) !== usuario) return false;
+      const quando = new Date(textoDe(n.criada_em)).getTime();
+      return !quando || quando >= corte;
+    })
+    .map(function (n) {
+      return {
+        notifId: textoDe(n.notif_id), tipo: textoDe(n.tipo), titulo: textoDe(n.titulo),
+        corpo: textoDe(n.corpo), link: textoDe(n.link), lida: ehVerdadeiro(n.lida),
+        criadaEm: textoDe(n.criada_em),
+      };
+    })
+    .sort(function (a, b) { return String(b.criadaEm).localeCompare(String(a.criadaEm)); });
+
+  const naoLidas = minhas.filter(function (n) { return !n.lida; });
+  const porTipo = {};
+  naoLidas.forEach(function (n) { porTipo[n.tipo] = (porTipo[n.tipo] || 0) + 1; });
+
+  return { ok: true, avisos: minhas, naoLidas: naoLidas.length, badges: porTipo };
+}
+
+function rotaNotifMarcarLida(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const usuario = normalizeLogin(payload.usuario);
+  const notifId = textoDe(payload.notif_id);
+  if (!usuario || !notifId) return { ok: false, error: "Informe o aviso e o usuario." };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheet = garantirAba(ss, ABA_NOTIFICACOES);
+    const colLida = CABECALHOS.NOTIFICACOES.indexOf("lida") + 1;
+    const alvo = lerAbaComLinha(ss, ABA_NOTIFICACOES).filter(function (n) {
+      return textoDe(n.notif_id) === notifId && normalizeLogin(n.usuario) === usuario;
+    })[0];
+    // Aviso de outra pessoa nao e "nao encontrado" por acaso: ninguem marca
+    // como lido o que nao e seu.
+    if (!alvo) return { ok: false, error: "Aviso nao encontrado." };
+    sheet.getRange(alvo._row, colLida).setValue(true);
+    return { ok: true, notifId: notifId };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function rotaNotifMarcarTodasLidas(payload) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const usuario = normalizeLogin(payload.usuario);
+  if (!usuario) return { ok: false, error: "Informe o usuario." };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheet = garantirAba(ss, ABA_NOTIFICACOES);
+    const colLida = CABECALHOS.NOTIFICACOES.indexOf("lida") + 1;
+    let marcadas = 0;
+    lerAbaComLinha(ss, ABA_NOTIFICACOES).forEach(function (n) {
+      if (normalizeLogin(n.usuario) !== usuario || ehVerdadeiro(n.lida)) return;
+      sheet.getRange(n._row, colLida).setValue(true);
+      marcadas += 1;
+    });
+    return { ok: true, marcadas: marcadas };
+  } finally {
+    lock.releaseLock();
+  }
 }

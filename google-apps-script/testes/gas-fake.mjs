@@ -69,9 +69,21 @@ export function carregarCodeGs(caminho) {
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
     Logger: { log: (m) => logs.push(String(m)) },
     Utilities: {
-      formatDate(data, _tz, formato) {
+      // Fuso de verdade: o Apps Script formata no timezone pedido, e o código
+      // de data operacional depende exatamente disso. Só America/Sao_Paulo,
+      // que é o único que o projeto usa.
+      formatDate(data, tz, formato) {
+        const deslocamento = tz === "America/Sao_Paulo" ? -3 : 0;
+        const d = new Date(data.getTime() + deslocamento * 3600000);
         const p = (n) => String(n).padStart(2, "0");
-        return formato.replace("yyyy", data.getFullYear()).replace("MM", p(data.getMonth() + 1)).replace("dd", p(data.getDate()));
+        return formato
+          .replace("yyyy", d.getUTCFullYear())
+          .replace("MM", p(d.getUTCMonth() + 1))
+          .replace("dd", p(d.getUTCDate()))
+          .replace("HH", p(d.getUTCHours()))
+          .replace("mm", p(d.getUTCMinutes()))
+          .replace("ss", p(d.getUTCSeconds()))
+          .replace("H", String(d.getUTCHours()));
       },
       computeDigest: () => [1, 2, 3],
       DigestAlgorithm: { SHA_256: "SHA_256" },
